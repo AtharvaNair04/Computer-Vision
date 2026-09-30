@@ -1,0 +1,6 @@
+*.mexa64
+*.mexw64
+*.m~
+code_full/cache
+code_full/data
+.DS_Store
