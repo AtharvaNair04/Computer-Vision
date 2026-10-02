@@ -1,4 +1,6 @@
 % Compare original FMP with adaptive preprocessing + FMP
+addpath('mex_pc');
+addpath('visualization');
 
 imageFiles = dir('images/*.jpg');
 

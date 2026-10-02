@@ -1,51 +1,199 @@
-function pck = eval_pck_matched(det, gt, thresh)
+function pck = eval_pck_matched(det, test, thresh)
+% EVAL_PCK_MATCHED
+%
+% Computes PCK for PARSE using the FMP 26-point detections
+% converted to the original 14 PARSE joints.
+%
+% This follows the same 26 -> 14 mapping used by:
+%     PARSE_transback.m
+%
+% Inputs:
+%   det    - detection results from box2obj()
+%   test   - PARSE ground truth
+%   thresh - normalized PCK threshold
+%
+% Output:
+%   pck    - 1 x 14 PCK values
 
-if nargin < 3
-    thresh = 0.1;
-end
+    numImages = length(test);
+    numJoints = 14;
 
-assert(numel(det) == numel(gt));
+    % -------------------------------------------------------------
+    % Same transformation used by PARSE_transback.m
+    % -------------------------------------------------------------
 
-numpart = size(gt(1).obj(1).point, 1);
-tp = zeros(numpart, 0);
+    I = [1  2  3  4  5  6  7  8  9  10 11 12 13 14];
 
-for n = 1:numel(gt)
+    J = [14 12 10 22 24 26 7  5  3  15 17 19 2  1];
 
-    % Ground-truth scale
-    point = gt(n).obj(1).point;
+    A = ones(1,14);
 
-    box = [min(point, [], 1) max(point, [], 1)];
+    Transback = full(sparse(I, J, A, 14, 26));
 
-    scale = max( ...
-        box(3) - box(1) + 1, ...
-        box(4) - box(2) + 1);
 
-    % No detection for this image
-    if isempty(det(n).obj)
+    % -------------------------------------------------------------
+    % Counters
+    % -------------------------------------------------------------
 
-        tp(:, end+1) = false(numpart, 1);
-        continue;
+    correct = zeros(1, numJoints);
+
+    total = zeros(1, numJoints);
+
+
+    % -------------------------------------------------------------
+    % Process every test image
+    % -------------------------------------------------------------
+
+    for i = 1:numImages
+
+        % Ground truth
+        gtObj = test(i).obj(1);
+
+        gtPoints = gtObj.point;
+
+
+        % ---------------------------------------------------------
+        % Ground truth should be 14 x 2
+        % ---------------------------------------------------------
+
+        if size(gtPoints,1) ~= 14 || size(gtPoints,2) ~= 2
+
+            warning( ...
+                'Image %d: unexpected GT size [%d %d]', ...
+                i, ...
+                size(gtPoints,1), ...
+                size(gtPoints,2));
+
+            continue;
+
+        end
+
+
+        % ---------------------------------------------------------
+        % No detection
+        % ---------------------------------------------------------
+
+        if isempty(det(i).obj)
+
+            total = total + 1;
+
+            continue;
+
+        end
+
+
+        % ---------------------------------------------------------
+        % Select the detection with the highest detection score
+        % ---------------------------------------------------------
+
+        bestIdx = 1;
+        bestScore = -inf;
+
+        for d = 1:length(det(i).obj)
+
+            if isfield(det(i).obj(d), 'score')
+
+                currentScore = det(i).obj(d).score;
+
+            else
+
+                currentScore = 0;
+
+            end
+
+
+            if currentScore > bestScore
+
+                bestScore = currentScore;
+                bestIdx = d;
+
+            end
+
+        end
+
+
+        detectedPoints = det(i).obj(bestIdx).point;
+
+
+        % ---------------------------------------------------------
+        % Convert FMP 26 points -> PARSE 14 joints
+        % ---------------------------------------------------------
+
+        if size(detectedPoints,1) ~= 26 || ...
+           size(detectedPoints,2) ~= 2
+
+            warning( ...
+                'Image %d: unexpected detection size [%d %d]', ...
+                i, ...
+                size(detectedPoints,1), ...
+                size(detectedPoints,2));
+
+            total = total + 1;
+
+            continue;
+
+        end
+
+
+        detectedPoints = Transback * detectedPoints;
+
+
+        % ---------------------------------------------------------
+        % Calculate torso/scale normalization
+        %
+        % Use the same PARSE joint representation after
+        % conversion.
+        % ---------------------------------------------------------
+
+        shoulder1 = gtPoints(3,:);
+        shoulder2 = gtPoints(4,:);
+
+        scale = sqrt(sum( ...
+            (shoulder1 - shoulder2).^2));
+
+
+        if scale <= 0
+
+            continue;
+
+        end
+
+
+        % ---------------------------------------------------------
+        % Calculate Euclidean distance for each joint
+        % ---------------------------------------------------------
+
+        distances = sqrt(sum( ...
+            (detectedPoints - gtPoints).^2, ...
+            2));
+
+
+        % Normalize by scale
+        normalizedDistance = distances ./ scale;
+
+
+        % ---------------------------------------------------------
+        % Count correct joints
+        % ---------------------------------------------------------
+
+        correct = correct + ...
+            (normalizedDistance <= thresh)';
+
+
+        total = total + 1;
 
     end
 
-    % PARSE has one ground-truth person per image.
-    % Use the highest-scoring detection.
-    scores = [det(n).obj.score];
-    [~, best] = max(scores);
 
-    detectedPoint = det(n).obj(best).point;
+    % -------------------------------------------------------------
+    % Final PCK
+    % -------------------------------------------------------------
 
-    % Distance for every keypoint
-    dist = sqrt(sum( ...
-        (detectedPoint - point).^2, 2));
+    pck = zeros(1, numJoints);
 
-    % Correct if within threshold * person scale
-    tp(:, end+1) = ...
-        dist <= thresh * scale;
+    valid = total > 0;
 
-end
-
-% PCK for each keypoint
-pck = mean(tp, 2)';
+    pck(valid) = ...
+        correct(valid) ./ total(valid);
 
 end

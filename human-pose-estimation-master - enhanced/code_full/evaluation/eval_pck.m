@@ -28,7 +28,7 @@ cnt = 0;
 for n = 1:numel(gt)
   for i = 1:numel(gt(n).obj)
     cnt = cnt + 1;
-    if isempty(det(n).obj(i).point), continue, end;
+    if isempty(det(n).obj) || numel(det(n).obj) < i || isempty(det(n).obj(i).point), continue, end;
     dist = sqrt(sum((det(n).obj(i).point - gt(n).obj(i).point).^2, 2));
     tp(:,cnt) = dist <= thresh * gt(n).obj(i).scale;
   end

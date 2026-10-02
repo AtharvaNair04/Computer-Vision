@@ -1,184 +1,245 @@
 function [out, info] = adaptive_preprocess_v2(im)
 % ADAPTIVE_PREPROCESS_V2
-% Conservative adaptive preprocessing for FMP/HOG.
 %
-% The goal is to improve poor-quality images while preserving
-% the local gradients used by the original FMP model.
+% Adaptive image preprocessing based on:
+%   - brightness
+%   - contrast
+%   - noise
+%   - sharpness
+%
+% Handles uint8 images and double images in either:
+%   0-1 range
+%   0-255 range
 
-    originalClass = class(im);
+% ------------------------------------------------------------
+% Preserve original class
+% ------------------------------------------------------------
+originalClass = class(im);
 
-    if ~isa(im, 'uint8')
-        im = im2uint8(im);
-    end
+% ------------------------------------------------------------
+% Convert input safely to uint8
+% ------------------------------------------------------------
+if isa(im,'uint8')
 
-    % ---------------------------------------------------------
-    % Quality analysis
-    % ---------------------------------------------------------
+    workingImage = im;
 
-    if size(im,3) == 3
-        gray = rgb2gray(im);
+elseif isa(im,'double') || isa(im,'single')
+
+    maxValue = max(im(:));
+
+    if maxValue <= 1
+
+        % Double/single image already in 0-1 range
+        workingImage = im2uint8(im);
+
     else
-        gray = im;
-    end
 
-    grayDouble = im2double(gray);
-
-    brightness = mean(grayDouble(:));
-    contrast = std(grayDouble(:));
-
-    smoothImage = imgaussfilt(grayDouble, 1);
-    residual = grayDouble - smoothImage;
-    noiseLevel = std(residual(:));
-
-    laplacianKernel = [0 1 0;
-                       1 -4 1;
-                       0 1 0];
-
-    laplacianResponse = imfilter( ...
-        grayDouble, ...
-        laplacianKernel, ...
-        'replicate');
-
-    sharpness = var(laplacianResponse(:));
-
-    % ---------------------------------------------------------
-    % Store measurements
-    % ---------------------------------------------------------
-
-    info.brightness = brightness;
-    info.contrast = contrast;
-    info.noise = noiseLevel;
-    info.sharpness = sharpness;
-    info.operations = {};
-
-    enhanced = im;
-
-    % ---------------------------------------------------------
-    % 1. Mild gamma correction
-    % ---------------------------------------------------------
-    
-    if brightness < 0.25
-
-        % Mild correction only
-        gamma = 0.85;
-
-        enhanced = imadjust( ...
-            enhanced, ...
-            [], ...
-            [], ...
-            gamma);
-
-        info.operations{end+1} = 'Mild gamma correction';
-
-    elseif brightness > 0.80
-
-        % Mild correction for very bright images
-        gamma = 1.10;
-
-        enhanced = imadjust( ...
-            enhanced, ...
-            [], ...
-            [], ...
-            gamma);
-
-        info.operations{end+1} = 'Mild brightness correction';
+        % Double/single image is in 0-255 range
+        workingImage = uint8(min(max(im,0),255));
 
     end
 
-    % ---------------------------------------------------------
-    % 2. Mild global contrast enhancement
-    % ---------------------------------------------------------
+else
 
-    if contrast < 0.12
+    workingImage = im2uint8(im);
 
-        % Avoid CLAHE because it can strongly modify HOG gradients.
+end
 
-        if size(enhanced,3) == 3
+% ------------------------------------------------------------
+% Convert to grayscale for image statistics
+% ------------------------------------------------------------
+if size(workingImage,3) == 3
+    gray = rgb2gray(workingImage);
+else
+    gray = workingImage;
+end
 
-            lab = rgb2lab(enhanced);
+grayDouble = im2double(gray);
 
-            L = lab(:,:,1) / 100;
+% ------------------------------------------------------------
+% Calculate image statistics
+% ------------------------------------------------------------
 
-            % Gentle contrast stretch
-            low = min(L(:));
-            high = max(L(:));
+brightness = mean(grayDouble(:));
 
-            if high > low
-                L = (L - low) / (high - low);
-            end
+contrast = std(grayDouble(:));
 
-            lab(:,:,1) = L * 100;
+% Estimate noise using high-frequency residual
+smoothImage = imgaussfilt(grayDouble,1);
 
-            enhanced = lab2rgb( ...
-                lab, ...
-                'OutputType', ...
-                'uint8');
+residual = grayDouble - smoothImage;
 
-        else
+noiseLevel = std(residual(:));
 
-            low = double(min(enhanced(:)));
-            high = double(max(enhanced(:)));
+% Estimate sharpness using Laplacian
+laplacianKernel = [0 1 0;
+                   1 -4 1;
+                   0 1 0];
 
-            if high > low
-                enhanced = uint8( ...
-                    255 * ...
-                    (double(enhanced) - low) / ...
-                    (high - low));
-            end
+laplacianResponse = imfilter( ...
+    grayDouble, ...
+    laplacianKernel, ...
+    'replicate');
+
+sharpness = var(laplacianResponse(:));
+
+% ------------------------------------------------------------
+% Store statistics
+% ------------------------------------------------------------
+
+info.brightness = brightness;
+info.contrast = contrast;
+info.noise = noiseLevel;
+info.sharpness = sharpness;
+
+info.operations = {};
+
+% ------------------------------------------------------------
+% Start with original image
+% ------------------------------------------------------------
+
+enhanced = workingImage;
+
+% ------------------------------------------------------------
+% Brightness correction
+% ------------------------------------------------------------
+
+if brightness < 0.25
+
+    % Dark image
+    gamma = 0.85;
+
+    enhanced = imadjust( ...
+        enhanced, ...
+        [], ...
+        [], ...
+        gamma);
+
+    info.operations{end+1} = 'Mild gamma correction';
+
+elseif brightness > 0.80
+
+    % Bright image
+    gamma = 1.10;
+
+    enhanced = imadjust( ...
+        enhanced, ...
+        [], ...
+        [], ...
+        gamma);
+
+    info.operations{end+1} = 'Mild brightness correction';
+
+end
+
+% ------------------------------------------------------------
+% Contrast enhancement
+% ------------------------------------------------------------
+
+if contrast < 0.12
+
+    if size(enhanced,3) == 3
+
+        lab = rgb2lab(enhanced);
+
+        L = lab(:,:,1) / 100;
+
+        low = min(L(:));
+        high = max(L(:));
+
+        if high > low
+
+            L = (L-low)/(high-low);
 
         end
 
-        info.operations{end+1} = 'Gentle contrast enhancement';
+        lab(:,:,1) = L * 100;
 
-    end
-
-    % ---------------------------------------------------------
-    % 3. Do NOT denoise by default
-    % ---------------------------------------------------------
-    %
-    % HOG relies on local gradients. Strong denoising can remove
-    % useful body-part boundaries.
-    %
-    % Therefore noise is measured but not modified in V2.
-
-    if noiseLevel > 0.08
-        info.operations{end+1} = 'High noise detected - unchanged';
-    end
-
-    % ---------------------------------------------------------
-    % 4. Do NOT sharpen by default
-    % ---------------------------------------------------------
-    %
-    % Artificial sharpening can introduce false gradients.
-
-    if sharpness < 0.001
-        info.operations{end+1} = 'Low sharpness detected - unchanged';
-    end
-
-    % ---------------------------------------------------------
-    % Safety
-    % ---------------------------------------------------------
-
-    enhanced = min(max(enhanced, 0), 255);
-
-    % ---------------------------------------------------------
-    % Restore original type
-    % ---------------------------------------------------------
-
-    if strcmp(originalClass, 'double')
-
-        out = im2double(enhanced);
-
-    elseif strcmp(originalClass, 'single')
-
-        out = im2single(enhanced);
+        enhanced = lab2rgb( ...
+            lab, ...
+            'OutputType','uint8');
 
     else
 
-        out = uint8(enhanced);
+        low = double(min(enhanced(:)));
+        high = double(max(enhanced(:)));
+
+        if high > low
+
+            enhanced = uint8( ...
+                255 * ...
+                (double(enhanced)-low) / ...
+                (high-low));
+
+        end
 
     end
 
-    info.numOperations = length(info.operations);
+    info.operations{end+1} = ...
+        'Gentle contrast enhancement';
+
+end
+
+% ------------------------------------------------------------
+% Noise detection
+% ------------------------------------------------------------
+
+if noiseLevel > 0.08
+
+    % Do not aggressively denoise because this can
+    % remove pose boundaries needed by HOG.
+
+    info.operations{end+1} = ...
+        'High noise detected - unchanged';
+
+end
+
+% ------------------------------------------------------------
+% Sharpness detection
+% ------------------------------------------------------------
+
+if sharpness < 0.001
+
+    % Do not aggressively sharpen because this can
+    % introduce artificial edges.
+
+    info.operations{end+1} = ...
+        'Low sharpness detected - unchanged';
+
+end
+
+% ------------------------------------------------------------
+% Safety clamp
+% ------------------------------------------------------------
+
+enhanced = uint8( ...
+    min(max(enhanced,0),255));
+
+% ------------------------------------------------------------
+% Restore original output class
+% ------------------------------------------------------------
+
+if strcmp(originalClass,'double')
+
+    % Return double in 0-255 because the detector receives
+    % double images in this format.
+
+    out = double(enhanced);
+
+elseif strcmp(originalClass,'single')
+
+    out = single(enhanced);
+
+else
+
+    out = uint8(enhanced);
+
+end
+
+% ------------------------------------------------------------
+% Number of operations
+% ------------------------------------------------------------
+
+info.numOperations = length(info.operations);
 
 end
