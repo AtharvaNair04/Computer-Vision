@@ -93,10 +93,10 @@ function [out, info] = adaptive_preprocess(im)
     % ---------------------------------------------------------
     % A. Very dark image
     % ---------------------------------------------------------
-    if brightness < 0.30
+    if brightness < 0.12
 
         % Adaptive gamma correction
-        gamma = max(0.55, min(0.85, brightness / 0.30));
+        gamma = max(0.60, min(0.85, brightness / 0.15));
 
         enhanced = imadjust( ...
             enhanced, ...
@@ -111,54 +111,28 @@ function [out, info] = adaptive_preprocess(im)
 
     % ---------------------------------------------------------
     % B. Low contrast image
+    %
+    % HOG features employ local L2-Hys block normalization which
+    % natively compensates for global contrast scaling.
+    % Artificially stretching pixel contrast (e.g. CLAHE) introduces
+    % spurious tile-boundary gradient artifacts and amplifies clutter.
+    % We preserve raw gradients for low-contrast images unless dark.
     % ---------------------------------------------------------
-    if contrast < 0.18
-
-        if size(enhanced, 3) == 3
-
-            % Convert to L*a*b colour space
-            lab = rgb2lab(enhanced);
-
-            L = lab(:,:,1) / 100;
-
-            % CLAHE
-            L = adapthisteq( ...
-                L, ...
-                'NumTiles', [8 8], ...
-                'ClipLimit', 0.015 ...
-            );
-
-            lab(:,:,1) = L * 100;
-
-            enhanced = lab2rgb( ...
-                lab, ...
-                'OutputType', ...
-                'uint8' ...
-            );
-
-        else
-
-            enhanced = adapthisteq( ...
-                enhanced, ...
-                'NumTiles', [8 8], ...
-                'ClipLimit', 0.015 ...
-            );
-
-        end
-
-        info.operations{end+1} = 'CLAHE';
-
+    if contrast < 0.08 && brightness < 0.20
+        % Only apply gentle linear adjustment when severely dim & low contrast
+        enhanced = imadjust(enhanced, stretchlim(enhanced, [0.01 0.99]), []);
+        info.operations{end+1} = 'Gentle contrast normalization';
     end
 
     % ---------------------------------------------------------
     % C. High noise
     % ---------------------------------------------------------
-    if noiseLevel > 0.055
+    if noiseLevel > 0.070
 
         enhanced = imbilatfilt( ...
             enhanced, ...
-            25, ...
-            7 ...
+            400, ...
+            1.2 ...
         );
 
         info.operations{end+1} = 'Bilateral denoising';
@@ -166,14 +140,15 @@ function [out, info] = adaptive_preprocess(im)
     end
 
     % ---------------------------------------------------------
-    % D. Low sharpness
+    % D. Low sharpness (Blur)
     % ---------------------------------------------------------
-    if sharpness < 0.002
+    if sharpness < 0.0012
 
         enhanced = imsharpen( ...
             enhanced, ...
             'Radius', 1, ...
-            'Amount', 0.8 ...
+            'Amount', 0.45, ...
+            'Threshold', 0.015 ...
         );
 
         info.operations{end+1} = 'Detail enhancement';

@@ -1,10 +1,10 @@
-function results = run_complete_experiments(numDegradedImages)
+function results = run_complete_experiments(numDegradedImages, numCleanImages)
 % RUN_COMPLETE_EXPERIMENTS
 % End-to-end evaluation and figure generation for:
 % "Improving Classical Human Pose Estimation Using Image Preprocessing and Adaptive Feature Extraction"
 %
 % Evaluates:
-%   1. Clean PARSE test set (all 205 images)
+%   1. Clean PARSE test set
 %   2. Degraded PARSE test sets (Dark, Low-Contrast, Noise, Blur)
 %
 % Compares 5 Model Configurations:
@@ -22,7 +22,10 @@ function results = run_complete_experiments(numDegradedImages)
 %   - Saves publication figures to figures/ directory
 
     if nargin < 1 || isempty(numDegradedImages)
-        numDegradedImages = 40; % Representative test set for fast, thorough evaluation
+        numDegradedImages = 30; % Representative test set for thorough evaluation
+    end
+    if nargin < 2 || isempty(numCleanImages)
+        numCleanImages = numDegradedImages;
     end
 
     clc;
@@ -71,26 +74,79 @@ function results = run_complete_experiments(numDegradedImages)
     % PART 1: CLEAN PARSE BENCHMARK EVALUATION (All 205 Test Images)
     % =============================================================
     fprintf('========================================================================\n');
-    fprintf(' PART 1: CLEAN PARSE BENCHMARK (All 205 Images)\n');
+    numCleanTest = min(numCleanImages, numTotalTest);
+    fprintf(' PART 1: CLEAN PARSE BENCHMARK (%d Images)\n', numCleanTest);
     fprintf('========================================================================\n');
 
-    cleanCacheBase  = fullfile(codeFullDir, 'cache', 'PARSE_baseline_eval_detections_adaptive_comparison.mat');
-    cleanCacheAdap  = fullfile(codeFullDir, 'cache', 'PARSE_adaptive_eval_adaptive_detections_adaptive_comparison.mat');
-    cleanCacheComb  = fullfile(codeFullDir, 'cache', 'PARSE_combined_detections.mat');
+    testClean = test(1:numCleanTest);
+    cleanCacheFile = fullfile(codeFullDir, 'cache', sprintf('PARSE_clean_all_methods_N%d.mat', numCleanTest));
 
-    dataBase = load(cleanCacheBase);
-    dataAdap = load(cleanCacheAdap);
-    dataComb = load(cleanCacheComb);
+    if exist(cleanCacheFile, 'file')
+        fprintf('  Loading cached clean detections...\n');
+        C = load(cleanCacheFile);
+        detBaseRawC  = C.detBaseRawC;  poseBaseRawC  = C.poseBaseRawC;
+        detAdapRawC  = C.detAdapRawC;  poseAdapRawC  = C.poseAdapRawC;
+        detCombRawC  = C.detCombRawC;  poseCombRawC  = C.poseCombRawC;
+    else
+        fprintf('  Running detections on %d clean test images...\n', numCleanTest);
+        detBaseRawC  = repmat(struct('obj', []), 1, numCleanTest);
+        detAdapRawC  = repmat(struct('obj', []), 1, numCleanTest);
+        detCombRawC  = repmat(struct('obj', []), 1, numCleanTest);
+        poseBaseRawC = repmat(struct('obj', []), 1, numCleanTest);
+        poseAdapRawC = repmat(struct('obj', []), 1, numCleanTest);
+        poseCombRawC = repmat(struct('obj', []), 1, numCleanTest);
+
+        ticClean = tic;
+        for n = 1:numCleanTest
+            imClean = imread(testClean(n).im);
+            gtObj   = testClean(n).obj;
+
+            % (1) Baseline
+            bBase = detect_fast(imClean, model, model.thresh);
+            poseBaseRawC(n).obj = extract_pose(bBase, gtObj);
+            bBase = nms(bBase, 0.3);
+            detBaseRawC(n).obj  = box2obj(bBase);
+
+            % (2) Adaptive Preprocessing check
+            [imPre, infoPre] = adaptive_preprocess(imClean);
+
+            % (3) Adaptive HOG + FMP (on clean image)
+            bAdap = adaptive_detect_fast(imClean, model, model.thresh);
+            poseAdapRawC(n).obj = extract_pose(bAdap, gtObj);
+            bAdap = nms(bAdap, 0.3);
+            detAdapRawC(n).obj  = box2obj(bAdap);
+
+            % (4) Combined: Adaptive HOG on preprocessed image
+            if infoPre.numOperations == 0
+                poseCombRawC(n).obj = poseAdapRawC(n).obj;
+                detCombRawC(n).obj  = detAdapRawC(n).obj;
+            else
+                bComb = adaptive_detect_fast(imPre, model, model.thresh);
+                poseCombRawC(n).obj = extract_pose(bComb, gtObj);
+                bComb = nms(bComb, 0.3);
+                detCombRawC(n).obj  = box2obj(bComb);
+            end
+
+            if mod(n, 10) == 0 || n == numCleanTest
+                fprintf('    Clean: processed %d/%d (%.1fs)\n', n, numCleanTest, toc(ticClean));
+            end
+        end
+
+        if ~exist(fullfile(codeFullDir, 'cache'), 'dir')
+            mkdir(fullfile(codeFullDir, 'cache'));
+        end
+        save(cleanCacheFile, 'detBaseRawC', 'poseBaseRawC', ...
+             'detAdapRawC', 'poseAdapRawC', 'detCombRawC', 'poseCombRawC');
+        fprintf('  Saved clean detections to cache.\n');
+    end
 
     % Map to 14 PARSE joints
-    detBase14 = PARSE_transback(dataBase.det);
-    poseBase14 = PARSE_transback(dataBase.pose);
-
-    detAdap14 = PARSE_transback(dataAdap.det);
-    poseAdap14 = PARSE_transback(dataAdap.pose);
-
-    detComb14 = PARSE_transback(dataComb.det);
-    poseComb14 = PARSE_transback(dataComb.pose);
+    detBase14  = PARSE_transback(detBaseRawC);
+    poseBase14 = PARSE_transback(poseBaseRawC);
+    detAdap14  = PARSE_transback(detAdapRawC);
+    poseAdap14 = PARSE_transback(poseAdapRawC);
+    detComb14  = PARSE_transback(detCombRawC);
+    poseComb14 = PARSE_transback(poseCombRawC);
 
     % Apply Pose Refinement on Combined
     fprintf('Applying Pose Refinement (Box 5) on Clean Test set...\n');
@@ -99,40 +155,40 @@ function results = run_complete_experiments(numDegradedImages)
 
     % Compute Clean Metrics
     % 1. Baseline
-    results.clean.baseline.apk_all  = eval_apk(detBase14, test, 0.1);
-    results.clean.baseline.pck_all  = eval_pck(poseBase14, test, 0.1);
+    results.clean.baseline.apk_all  = eval_apk(detBase14, testClean, 0.1);
+    results.clean.baseline.pck_all  = eval_pck(poseBase14, testClean, 0.1);
     results.clean.baseline.apk7     = map_to_7(results.clean.baseline.apk_all, mirror, order7);
     results.clean.baseline.pck7     = map_to_7(results.clean.baseline.pck_all, mirror, order7);
     results.clean.baseline.meanAPK  = mean(results.clean.baseline.apk7);
     results.clean.baseline.meanPCK  = mean(results.clean.baseline.pck7);
-    results.clean.baseline.pckCurve = compute_pck_curve(poseBase14, test, thresholds, mirror, order7);
+    results.clean.baseline.pckCurve = compute_pck_curve(poseBase14, testClean, thresholds, mirror, order7);
 
     % 2. Adaptive HOG
-    results.clean.adaptiveHOG.apk_all  = eval_apk(detAdap14, test, 0.1);
-    results.clean.adaptiveHOG.pck_all  = eval_pck(poseAdap14, test, 0.1);
+    results.clean.adaptiveHOG.apk_all  = eval_apk(detAdap14, testClean, 0.1);
+    results.clean.adaptiveHOG.pck_all  = eval_pck(poseAdap14, testClean, 0.1);
     results.clean.adaptiveHOG.apk7     = map_to_7(results.clean.adaptiveHOG.apk_all, mirror, order7);
     results.clean.adaptiveHOG.pck7     = map_to_7(results.clean.adaptiveHOG.pck_all, mirror, order7);
     results.clean.adaptiveHOG.meanAPK  = mean(results.clean.adaptiveHOG.apk7);
     results.clean.adaptiveHOG.meanPCK  = mean(results.clean.adaptiveHOG.pck7);
-    results.clean.adaptiveHOG.pckCurve = compute_pck_curve(poseAdap14, test, thresholds, mirror, order7);
+    results.clean.adaptiveHOG.pckCurve = compute_pck_curve(poseAdap14, testClean, thresholds, mirror, order7);
 
     % 3. Combined
-    results.clean.combined.apk_all  = eval_apk(detComb14, test, 0.1);
-    results.clean.combined.pck_all  = eval_pck(poseComb14, test, 0.1);
+    results.clean.combined.apk_all  = eval_apk(detComb14, testClean, 0.1);
+    results.clean.combined.pck_all  = eval_pck(poseComb14, testClean, 0.1);
     results.clean.combined.apk7     = map_to_7(results.clean.combined.apk_all, mirror, order7);
     results.clean.combined.pck7     = map_to_7(results.clean.combined.pck_all, mirror, order7);
     results.clean.combined.meanAPK  = mean(results.clean.combined.apk7);
     results.clean.combined.meanPCK  = mean(results.clean.combined.pck7);
-    results.clean.combined.pckCurve = compute_pck_curve(poseComb14, test, thresholds, mirror, order7);
+    results.clean.combined.pckCurve = compute_pck_curve(poseComb14, testClean, thresholds, mirror, order7);
 
     % 4. Refined
-    results.clean.refined.apk_all  = eval_apk(detRef14, test, 0.1);
-    results.clean.refined.pck_all  = eval_pck(poseRef14, test, 0.1);
+    results.clean.refined.apk_all  = eval_apk(detRef14, testClean, 0.1);
+    results.clean.refined.pck_all  = eval_pck(poseRef14, testClean, 0.1);
     results.clean.refined.apk7     = map_to_7(results.clean.refined.apk_all, mirror, order7);
     results.clean.refined.pck7     = map_to_7(results.clean.refined.pck_all, mirror, order7);
     results.clean.refined.meanAPK  = mean(results.clean.refined.apk7);
     results.clean.refined.meanPCK  = mean(results.clean.refined.pck7);
-    results.clean.refined.pckCurve = compute_pck_curve(poseRef14, test, thresholds, mirror, order7);
+    results.clean.refined.pckCurve = compute_pck_curve(poseRef14, testClean, thresholds, mirror, order7);
 
     print_clean_summary(results.clean, jointNames7);
 

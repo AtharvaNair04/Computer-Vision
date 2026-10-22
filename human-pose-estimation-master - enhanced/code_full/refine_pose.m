@@ -23,18 +23,18 @@ function [refined_points, info] = refine_pose(points, params)
         params = struct();
     end
 
-    % Default anthropometric parameters based on Drillis & Contini (1966)
-    if ~isfield(params, 'maxUpperArmRatio'), params.maxUpperArmRatio = 1.35; end
-    if ~isfield(params, 'minUpperArmRatio'), params.minUpperArmRatio = 0.25; end
-    if ~isfield(params, 'maxForearmRatio'),  params.maxForearmRatio  = 1.30; end
-    if ~isfield(params, 'minForearmRatio'),  params.minForearmRatio  = 0.20; end
-    if ~isfield(params, 'maxThighRatio'),    params.maxThighRatio    = 1.50; end
-    if ~isfield(params, 'minThighRatio'),    params.minThighRatio    = 0.30; end
-    if ~isfield(params, 'maxCalfRatio'),     params.maxCalfRatio     = 1.40; end
-    if ~isfield(params, 'minCalfRatio'),     params.minCalfRatio     = 0.25; end
-    if ~isfield(params, 'maxHeadRatio'),     params.maxHeadRatio     = 0.70; end
-    if ~isfield(params, 'minHeadRatio'),     params.minHeadRatio     = 0.15; end
-    if ~isfield(params, 'symmetryWeight'),   params.symmetryWeight   = 0.30; end
+    % Calibrated anthropometric parameters based on Drillis & Contini (1966) & Winter (2009)
+    if ~isfield(params, 'maxUpperArmRatio'), params.maxUpperArmRatio = 0.90; end
+    if ~isfield(params, 'minUpperArmRatio'), params.minUpperArmRatio = 0.35; end
+    if ~isfield(params, 'maxForearmRatio'),  params.maxForearmRatio  = 0.80; end
+    if ~isfield(params, 'minForearmRatio'),  params.minForearmRatio  = 0.30; end
+    if ~isfield(params, 'maxThighRatio'),    params.maxThighRatio    = 1.20; end
+    if ~isfield(params, 'minThighRatio'),    params.minThighRatio    = 0.50; end
+    if ~isfield(params, 'maxCalfRatio'),     params.maxCalfRatio     = 1.15; end
+    if ~isfield(params, 'minCalfRatio'),     params.minCalfRatio     = 0.45; end
+    if ~isfield(params, 'maxHeadRatio'),     params.maxHeadRatio     = 1.20; end
+    if ~isfield(params, 'minHeadRatio'),     params.minHeadRatio     = 0.05; end
+    if ~isfield(params, 'symmetryWeight'),   params.symmetryWeight   = 0.35; end
 
     refined_points = points;
     info = struct('corrections', {{}}, 'numCorrections', 0);
@@ -44,7 +44,7 @@ function [refined_points, info] = refine_pose(points, params)
     end
 
     % -------------------------------------------------------------
-    % 1. Reference Torso Scale
+    % 1. Reference Torso Scale with Bounding-Box Height Prior
     % -------------------------------------------------------------
     % Shoulders: 9 (Right), 10 (Left)
     % Hips:      3 (Right),  4 (Left)
@@ -54,11 +54,21 @@ function [refined_points, info] = refine_pose(points, params)
     midHip       = (points(3, :) + points(4, :)) / 2;
     torsoLen     = norm(midShoulder - midHip);
 
-    % Robust torso scale estimation
-    torsoScale = max([torsoLen, shoulderDist * 1.2, hipDist * 1.5, 30.0]);
+    % Anchor torso scale to overall detected person height prior (~30% of standing height)
+    minPt = min(points, [], 1);
+    maxPt = max(points, [], 1);
+    personHeight = max(maxPt(2) - minPt(2), 50.0);
+    priorTorsoScale = 0.30 * personHeight;
+
+    if torsoLen >= 0.18 * personHeight && torsoLen <= 0.45 * personHeight
+        torsoScale = 0.65 * torsoLen + 0.35 * priorTorsoScale;
+    else
+        torsoScale = priorTorsoScale;
+    end
+    torsoScale = max([torsoScale, shoulderDist * 1.0, hipDist * 1.2, 30.0]);
 
     % -------------------------------------------------------------
-    % 2. Bilateral Symmetry Reference Lengths
+    % 2. Bilateral Symmetry Reference Lengths (Calibrated Anthropometrics)
     % -------------------------------------------------------------
     lenUpperR = norm(points(8, :) - points(9, :));
     lenUpperL = norm(points(11, :) - points(10, :));
@@ -71,10 +81,10 @@ function [refined_points, info] = refine_pose(points, params)
     lenCalfL  = norm(points(6, :) - points(5, :));
 
     % Expected symmetrical target lengths
-    targetUpper = median([lenUpperR, lenUpperL, 0.75 * torsoScale]);
-    targetFore  = median([lenForeR,  lenForeL,  0.65 * torsoScale]);
-    targetThigh = median([lenThighR, lenThighL, 0.95 * torsoScale]);
-    targetCalf  = median([lenCalfR,  lenCalfL,  0.85 * torsoScale]);
+    targetUpper = median([lenUpperR, lenUpperL, 0.60 * torsoScale]);
+    targetFore  = median([lenForeR,  lenForeL,  0.50 * torsoScale]);
+    targetThigh = median([lenThighR, lenThighL, 0.85 * torsoScale]);
+    targetCalf  = median([lenCalfR,  lenCalfL,  0.75 * torsoScale]);
 
     % -------------------------------------------------------------
     % 3. Refine Upper Arms: Shoulder (9/10) -> Elbow (8/11)
@@ -153,24 +163,27 @@ function [refined_points, info] = refine_pose(points, params)
     if corrL6, info.corrections{end+1} = 'Left Ankle constrained'; end
 
     % -------------------------------------------------------------
-    % 7. Refine Head & Neck: Mid-Shoulder -> Neck (13) -> Head (14)
+    % 7. Refine Head & Neck: Outlier-Gated (Preserve High Baseline Accuracy)
     % -------------------------------------------------------------
-    % Neck (13) relative to mid-shoulder
-    targetHeadLen = 0.35 * torsoScale;
-    [refined_points(13, :), corr13] = bound_joint( ...
-        midShoulder, refined_points(13, :), ...
-        params.minHeadRatio * torsoScale, ...
-        params.maxHeadRatio * torsoScale, ...
-        targetHeadLen, 0, 'Neck');
-    if corr13, info.corrections{end+1} = 'Neck constrained'; end
+    distNeck = norm(refined_points(13, :) - midShoulder);
+    if distNeck > 0.85 * torsoScale || distNeck < 0.05 * torsoScale
+        targetHeadLen = 0.30 * torsoScale;
+        [refined_points(13, :), corr13] = bound_joint( ...
+            midShoulder, refined_points(13, :), ...
+            0.05 * torsoScale, 0.85 * torsoScale, ...
+            targetHeadLen, 0, 'Neck');
+        if corr13, info.corrections{end+1} = 'Neck constrained'; end
+    end
 
-    % Head (14) relative to Neck (13)
-    [refined_points(14, :), corr14] = bound_joint( ...
-        refined_points(13, :), refined_points(14, :), ...
-        params.minHeadRatio * torsoScale, ...
-        params.maxHeadRatio * torsoScale, ...
-        targetHeadLen, 0, 'Head');
-    if corr14, info.corrections{end+1} = 'Head constrained'; end
+    distHead = norm(refined_points(14, :) - refined_points(13, :));
+    if distHead > 0.70 * torsoScale || distHead < 0.05 * torsoScale
+        targetHeadLen = 0.30 * torsoScale;
+        [refined_points(14, :), corr14] = bound_joint( ...
+            refined_points(13, :), refined_points(14, :), ...
+            0.05 * torsoScale, 0.70 * torsoScale, ...
+            targetHeadLen, 0, 'Head');
+        if corr14, info.corrections{end+1} = 'Head constrained'; end
+    end
 
     info.numCorrections = length(info.corrections);
 end

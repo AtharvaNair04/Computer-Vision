@@ -1,494 +1,553 @@
 function evaluate_degraded()
 
-% EVALUATE_DEGRADED
-%
-% Robustness experiment for the PARSE test set.
-%
-% Compares:
-%   1. Original FMP
-%   2. FMP + Adaptive Preprocessing V2
-%
-% Conditions:
-%   dark
-%   lowcontrast
-%   noise
-%   blur
+clc;
 
-    clc;
+fprintf('=============================================\n');
+fprintf('  DEGRADED PARSE ROBUSTNESS EXPERIMENT\n');
+fprintf('  BASELINE vs ADAPTIVE PREPROCESSING V2\n');
+fprintf('=============================================\n\n');
 
-    fprintf('=============================================\n');
-    fprintf('  DEGRADED PARSE ROBUSTNESS EXPERIMENT\n');
-    fprintf('=============================================\n\n');
+% =========================================================
+% Paths
+% =========================================================
 
+codeFullDir = fileparts(mfilename('fullpath'));
 
-    %% =========================================================
-    % Paths
-    % ==========================================================
+codeBasicDir = fullfile( ...
+    fileparts(codeFullDir), ...
+    'code_basic');
 
-    codeFullDir = fileparts(mfilename('fullpath'));
+detectionDir = fullfile( ...
+    codeFullDir, ...
+    'detection');
 
-    codeBasicDir = fullfile( ...
-        fileparts(codeFullDir), ...
-        'code_basic');
+degradedDir = fullfile( ...
+    codeFullDir, ...
+    'data', ...
+    'PARSE_degraded');
 
-    detectionDir = fullfile( ...
-        codeFullDir, ...
-        'detection');
+% =========================================================
+% Add required paths
+% =========================================================
 
-    degradedDir = fullfile( ...
-        codeFullDir, ...
-        'data', ...
-        'PARSE_degraded');
+addpath(codeFullDir, '-begin');
+addpath(detectionDir, '-begin');
+addpath(codeBasicDir);
+addpath(fullfile(codeBasicDir, 'mex_pc'));
 
+% =========================================================
+% Verify important functions
+% =========================================================
 
-    %% =========================================================
-    % Add required paths
-    % ==========================================================
+fprintf('Using detect_fast:\n');
+disp(which('detect_fast'));
 
-    % Put code_full/detection first so the correct FMP
-    % detection functions are used.
+fprintf('Using box2obj:\n');
+disp(which('box2obj'));
 
-    addpath(codeFullDir, '-begin');
-    addpath(detectionDir, '-begin');
+fprintf('Using nms:\n');
+disp(which('nms'));
 
-    % Basic code and MEX files
-    addpath(codeBasicDir);
-    addpath(fullfile(codeBasicDir, 'mex_pc'));
+fprintf('Using PARSE_transback:\n');
+disp(which('PARSE_transback'));
 
+fprintf('Using eval_apk:\n');
+disp(which('eval_apk'));
 
-    %% =========================================================
-    % Verify important functions
-    % ==========================================================
+fprintf('Using eval_pck:\n');
+disp(which('eval_pck'));
 
-    fprintf('Using detect_fast:\n');
-    disp(which('detect_fast'));
+fprintf('\n');
 
-    fprintf('Using box2obj:\n');
-    disp(which('box2obj'));
+% =========================================================
+% Load FMP model
+% =========================================================
 
-    fprintf('Using nms:\n');
-    disp(which('nms'));
+modelFile = fullfile( ...
+    codeBasicDir, ...
+    'PARSE_model.mat');
 
-    fprintf('Using eval_apk:\n');
-    disp(which('eval_apk'));
+fprintf('Loading FMP model...\n');
 
-    fprintf('Using eval_pck_matched:\n');
-    disp(which('eval_pck_matched'));
+load(modelFile, 'model');
+
+fprintf('Model loaded.\n\n');
+
+% =========================================================
+% Same detection threshold as clean evaluation
+% =========================================================
+
+model.thresh = min(model.thresh, -1);
+
+fprintf('Detection threshold: %.4f\n\n', model.thresh);
+
+% =========================================================
+% Load PARSE ground truth
+% =========================================================
+
+fprintf('Loading PARSE ground truth...\n');
+
+[~, test] = PARSE_data('PARSE');
+
+fprintf('Test images: %d\n\n', length(test));
+
+% =========================================================
+% Experimental conditions
+% =========================================================
+
+conditions = { ...
+    'dark', ...
+    'lowcontrast', ...
+    'noise', ...
+    'blur'};
+
+% =========================================================
+% Storage
+% =========================================================
+
+results = struct();
+
+% =========================================================
+% Run every degradation condition
+% =========================================================
+
+for c = 1:length(conditions)
+
+    condition = conditions{c};
 
     fprintf('\n');
+    fprintf('=============================================\n');
+    fprintf('Condition: %s\n', upper(condition));
+    fprintf('=============================================\n');
 
+    imageDir = fullfile( ...
+        degradedDir, ...
+        condition);
 
-    %% =========================================================
-    % Load FMP model
-    % ==========================================================
+    % -----------------------------------------------------
+    % Detection containers
+    % -----------------------------------------------------
 
-    modelFile = fullfile( ...
-        codeBasicDir, ...
-        'PARSE_model.mat');
+    detOriginal = repmat( ...
+        struct('obj', []), ...
+        1, ...
+        length(test));
 
-    fprintf('Loading FMP model...\n');
+    detEnhanced = repmat( ...
+        struct('obj', []), ...
+        1, ...
+        length(test));
 
-    load(modelFile, 'model');
+    % =====================================================
+    % Preprocessing statistics
+    % =====================================================
 
-    fprintf('Model loaded.\n\n');
+    countGamma = 0;
+    countBrightness = 0;
+    countContrast = 0;
+    countNoise = 0;
+    countSharpness = 0;
+    countNoChange = 0;
 
+    % =====================================================
+    % Process all test images
+    % =====================================================
 
-    %% =========================================================
-    % Use the same detection threshold as the original
-    % PARSE evaluation pipeline
-    % ==========================================================
+    for n = 1:length(test)
 
-    model.thresh = min(model.thresh, -1);
+        imageNumber = 100 + n;
 
-    fprintf('Detection threshold: %.4f\n\n', model.thresh);
+        filename = sprintf( ...
+            'im%04d.jpg', ...
+            imageNumber);
 
+        imageFile = fullfile( ...
+            imageDir, ...
+            filename);
 
-    %% =========================================================
-    % Load PARSE ground truth
-    % ==========================================================
+        if ~exist(imageFile, 'file')
 
-    fprintf('Loading PARSE ground truth...\n');
+            error( ...
+                'Missing degraded image: %s', ...
+                imageFile);
 
-    [~, test] = PARSE_data('PARSE');
+        end
 
-    fprintf('Test images: %d\n\n', length(test));
+        % -------------------------------------------------
+        % Load degraded image
+        % -------------------------------------------------
 
+        im = imread(imageFile);
 
-    %% =========================================================
-    % Experimental conditions
-    % ==========================================================
+        % =================================================
+        % ORIGINAL FMP
+        % =================================================
 
-    conditions = { ...
-        'dark', ...
-        'lowcontrast', ...
-        'noise', ...
-        'blur'};
+        boxesOriginal = detect_fast( ...
+            im, ...
+            model, ...
+            model.thresh);
 
+        boxesOriginal = nms( ...
+            boxesOriginal, ...
+            0.1);
 
-    %% =========================================================
-    % Storage
-    % ==========================================================
+        detOriginal(n).obj = ...
+            box2obj(boxesOriginal);
 
-    results = struct();
+        % =================================================
+        % ADAPTIVE PREPROCESSING V2 + FMP
+        % =================================================
 
+        [imEnhanced, info] = ...
+            adaptive_preprocess_v2(im);
 
-    %% =========================================================
-    % Run every degradation condition
-    % ==========================================================
+        % -------------------------------------------------
+        % Count preprocessing operations
+        % -------------------------------------------------
 
-    for c = 1:length(conditions)
+        if info.numOperations == 0
 
-        condition = conditions{c};
+            countNoChange = countNoChange + 1;
 
-        fprintf('\n');
-        fprintf('=============================================\n');
-        fprintf('Condition: %s\n', upper(condition));
-        fprintf('=============================================\n');
+        end
 
+        for k = 1:length(info.operations)
 
-        imageDir = fullfile( ...
-            degradedDir, ...
-            condition);
+            op = lower(info.operations{k});
 
+            if contains(op, 'gamma')
 
-        %% -----------------------------------------------------
-        % Detection containers
-        % ------------------------------------------------------
+                countGamma = countGamma + 1;
 
-        detOriginal = repmat( ...
-            struct('obj', []), ...
-            1, ...
-            length(test));
+            elseif contains(op, 'brightness')
 
-        detEnhanced = repmat( ...
-            struct('obj', []), ...
-            1, ...
-            length(test));
+                countBrightness = countBrightness + 1;
 
+            elseif contains(op, 'contrast')
 
-        %% =====================================================
-        % Process all 205 test images
-        % ======================================================
+                countContrast = countContrast + 1;
 
-        for n = 1:length(test)
+            elseif contains(op, 'noise')
 
-            imageNumber = 100 + n;
+                countNoise = countNoise + 1;
 
-            filename = sprintf( ...
-                'im%04d.jpg', ...
-                imageNumber);
+            elseif contains(op, 'sharpness')
 
-            imageFile = fullfile( ...
-                imageDir, ...
-                filename);
-
-
-            if ~exist(imageFile, 'file')
-
-                error( ...
-                    'Missing degraded image: %s', ...
-                    imageFile);
-
-            end
-
-
-            im = imread(imageFile);
-
-
-            %% =================================================
-            % ORIGINAL FMP
-            % ==================================================
-
-            boxesOriginal = detect_fast( ...
-                im, ...
-                model, ...
-                model.thresh);
-
-
-            % Same NMS procedure as original FMP testing
-            boxesOriginal = nms( ...
-                boxesOriginal, ...
-                0.3);
-
-
-            % Convert detection boxes into object structure
-            detOriginal(n).obj = ...
-                box2obj(boxesOriginal);
-
-
-            %% =================================================
-            % ADAPTIVE PREPROCESSING V2 + FMP
-            % ==================================================
-
-            [imEnhanced, ~] = ...
-                adaptive_preprocess_v2(im);
-
-
-            boxesEnhanced = detect_fast( ...
-                imEnhanced, ...
-                model, ...
-                model.thresh);
-
-
-            % Same NMS procedure
-            boxesEnhanced = nms( ...
-                boxesEnhanced, ...
-                0.3);
-
-
-            % Convert into object structure
-            detEnhanced(n).obj = ...
-                box2obj(boxesEnhanced);
-
-
-            %% =================================================
-            % Progress
-            % ==================================================
-
-            if mod(n, 10) == 0
-
-                fprintf( ...
-                    '%s: %d / %d\n', ...
-                    condition, ...
-                    n, ...
-                    length(test));
+                countSharpness = countSharpness + 1;
 
             end
 
         end
 
+        % -------------------------------------------------
+        % FMP on enhanced image
+        % -------------------------------------------------
 
-        %% =====================================================
-        % Evaluate APK
-        % ======================================================
+        boxesEnhanced = detect_fast( ...
+            imEnhanced, ...
+            model, ...
+            model.thresh);
 
-        fprintf('\nCalculating APK...\n');
-
-
-        apkOriginal = eval_apk( ...
-            detOriginal, ...
-            test, ...
+        boxesEnhanced = nms( ...
+            boxesEnhanced, ...
             0.1);
 
+        detEnhanced(n).obj = ...
+            box2obj(boxesEnhanced);
 
-        apkEnhanced = eval_apk( ...
-            detEnhanced, ...
-            test, ...
-            0.1);
+        % -------------------------------------------------
+        % Progress
+        % -------------------------------------------------
 
+        if mod(n, 10) == 0
 
-        %% =====================================================
-        % Evaluate PCK
-        % ======================================================
+            fprintf( ...
+                '%s: %d / %d\n', ...
+                condition, ...
+                n, ...
+                length(test));
 
-        fprintf('Calculating PCK...\n');
-
-
-        pckOriginal = eval_pck_matched( ...
-            detOriginal, ...
-            test, ...
-            0.1);
-
-
-        pckEnhanced = eval_pck_matched( ...
-            detEnhanced, ...
-            test, ...
-            0.1);
-
-
-        %% =====================================================
-        % Average left/right joints
-        % ======================================================
-
-        mirror = [ ...
-            6 5 4 3 2 1 ...
-            12 11 10 9 8 7 ...
-            14 13];
-
-
-        apkOriginal = ...
-            (apkOriginal + apkOriginal(mirror)) / 2;
-
-
-        apkEnhanced = ...
-            (apkEnhanced + apkEnhanced(mirror)) / 2;
-
-
-        pckOriginal = ...
-            (pckOriginal + pckOriginal(mirror)) / 2;
-
-
-        pckEnhanced = ...
-            (pckEnhanced + pckEnhanced(mirror)) / 2;
-
-
-        %% =====================================================
-        % Mean scores
-        % ======================================================
-
-        meanAPKOriginal = mean(apkOriginal);
-
-        meanAPKEnhanced = mean(apkEnhanced);
-
-        meanPCKOriginal = mean(pckOriginal);
-
-        meanPCKEnhanced = mean(pckEnhanced);
-
-
-        %% =====================================================
-        % Store results
-        % ======================================================
-
-        results.(condition).apkOriginal = ...
-            apkOriginal;
-
-        results.(condition).apkEnhanced = ...
-            apkEnhanced;
-
-        results.(condition).pckOriginal = ...
-            pckOriginal;
-
-        results.(condition).pckEnhanced = ...
-            pckEnhanced;
-
-        results.(condition).meanAPKOriginal = ...
-            meanAPKOriginal;
-
-        results.(condition).meanAPKEnhanced = ...
-            meanAPKEnhanced;
-
-        results.(condition).meanPCKOriginal = ...
-            meanPCKOriginal;
-
-        results.(condition).meanPCKEnhanced = ...
-            meanPCKEnhanced;
-
-
-        %% =====================================================
-        % Print condition result
-        % ======================================================
-
-        fprintf('\n');
-        fprintf('RESULT: %s\n', upper(condition));
-        fprintf('---------------------------------------------\n');
-
-
-        fprintf( ...
-            'Original APK : %.2f\n', ...
-            100 * meanAPKOriginal);
-
-
-        fprintf( ...
-            'Enhanced APK : %.2f\n', ...
-            100 * meanAPKEnhanced);
-
-
-        fprintf( ...
-            'APK change   : %.2f pp\n', ...
-            100 * (meanAPKEnhanced - meanAPKOriginal));
-
-
-        fprintf('\n');
-
-
-        fprintf( ...
-            'Original PCK : %.2f\n', ...
-            100 * meanPCKOriginal);
-
-
-        fprintf( ...
-            'Enhanced PCK : %.2f\n', ...
-            100 * meanPCKEnhanced);
-
-
-        fprintf( ...
-            'PCK change   : %.2f pp\n', ...
-            100 * (meanPCKEnhanced - meanPCKOriginal));
+        end
 
     end
 
+    % =====================================================
+    % Print preprocessing statistics
+    % =====================================================
 
-    %% =========================================================
-    % FINAL SUMMARY
-    % ==========================================================
-
-    fprintf('\n\n');
-
-    fprintf( ...
-        '============================================================\n');
-
-    fprintf( ...
-        '              FINAL ROBUSTNESS RESULTS\n');
+    fprintf('\n');
+    fprintf('---------------------------------------------\n');
+    fprintf('PREPROCESSING ACTIVITY: %s\n', upper(condition));
+    fprintf('---------------------------------------------\n');
 
     fprintf( ...
-        '============================================================\n');
+        'Gamma correction      : %d / %d\n', ...
+        countGamma, length(test));
+
+    fprintf( ...
+        'Brightness correction : %d / %d\n', ...
+        countBrightness, length(test));
+
+    fprintf( ...
+        'Contrast enhancement  : %d / %d\n', ...
+        countContrast, length(test));
+
+    fprintf( ...
+        'High noise detected   : %d / %d\n', ...
+        countNoise, length(test));
+
+    fprintf( ...
+        'Low sharpness detected: %d / %d\n', ...
+        countSharpness, length(test));
+
+    fprintf( ...
+        'No change             : %d / %d\n', ...
+        countNoChange, length(test));
+
+    % =====================================================
+    % Convert FMP 26 keypoints to PARSE 14 keypoints
+    % =====================================================
+
+    fprintf('\nConverting predictions...\n');
+
+    poseOriginal = PARSE_transback(detOriginal);
+
+    poseEnhanced = PARSE_transback(detEnhanced);
+
+    % =====================================================
+    % APK EVALUATION
+    % =====================================================
+
+    fprintf('\nCalculating APK...\n');
+
+    apkOriginal = eval_apk( ...
+        poseOriginal, ...
+        test, ...
+        0.1);
+
+    apkEnhanced = eval_apk( ...
+        poseEnhanced, ...
+        test, ...
+        0.1);
+
+    % -----------------------------------------------------
+    % Average left/right joints
+    % -----------------------------------------------------
+
+    mirror = [ ...
+        6 5 4 3 2 1 ...
+        12 11 10 9 8 7 ...
+        14 13];
+
+    apkOriginal = ...
+        (apkOriginal + apkOriginal(mirror)) / 2;
+
+    apkEnhanced = ...
+        (apkEnhanced + apkEnhanced(mirror)) / 2;
+
+    % -----------------------------------------------------
+    % Same PARSE joint ordering
+    % -----------------------------------------------------
+
+    order = [14 9 8 7 3 2 1];
+
+    apkOriginal = apkOriginal(order);
+
+    apkEnhanced = apkEnhanced(order);
+
+    % -----------------------------------------------------
+    % Mean APK
+    % -----------------------------------------------------
+
+    meanAPKOriginal = mean(apkOriginal);
+
+    meanAPKEnhanced = mean(apkEnhanced);
+
+    % =====================================================
+    % PCK EVALUATION
+    % =====================================================
+
+    fprintf('Calculating PCK...\n');
+
+    pckOriginal = eval_pck( ...
+        poseOriginal, ...
+        test, ...
+        0.1);
+
+    pckEnhanced = eval_pck( ...
+        poseEnhanced, ...
+        test, ...
+        0.1);
+
+    % -----------------------------------------------------
+    % Average left/right joints
+    % -----------------------------------------------------
+
+    pckOriginal = ...
+        (pckOriginal + pckOriginal(mirror)) / 2;
+
+    pckEnhanced = ...
+        (pckEnhanced + pckEnhanced(mirror)) / 2;
+
+    % -----------------------------------------------------
+    % Same PARSE joint ordering
+    % -----------------------------------------------------
+
+    pckOriginal = pckOriginal(order);
+
+    pckEnhanced = pckEnhanced(order);
+
+    % -----------------------------------------------------
+    % Mean PCK
+    % -----------------------------------------------------
+
+    meanPCKOriginal = mean(pckOriginal);
+
+    meanPCKEnhanced = mean(pckEnhanced);
+
+    % =====================================================
+    % Store results
+    % =====================================================
+
+    results.(condition).apkOriginal = apkOriginal;
+    results.(condition).apkEnhanced = apkEnhanced;
+
+    results.(condition).pckOriginal = pckOriginal;
+    results.(condition).pckEnhanced = pckEnhanced;
+
+    results.(condition).meanAPKOriginal = ...
+        meanAPKOriginal;
+
+    results.(condition).meanAPKEnhanced = ...
+        meanAPKEnhanced;
+
+    results.(condition).meanPCKOriginal = ...
+        meanPCKOriginal;
+
+    results.(condition).meanPCKEnhanced = ...
+        meanPCKEnhanced;
+
+    % -----------------------------------------------------
+    % Store preprocessing statistics
+    % -----------------------------------------------------
+
+    results.(condition).countGamma = countGamma;
+    results.(condition).countBrightness = countBrightness;
+    results.(condition).countContrast = countContrast;
+    results.(condition).countNoise = countNoise;
+    results.(condition).countSharpness = countSharpness;
+    results.(condition).countNoChange = countNoChange;
+
+    % =====================================================
+    % Print condition result
+    % =====================================================
+
+    fprintf('\n');
+    fprintf('RESULT: %s\n', upper(condition));
+    fprintf('---------------------------------------------\n');
+
+    fprintf( ...
+        'Original APK : %.2f\n', ...
+        100 * meanAPKOriginal);
+
+    fprintf( ...
+        'Enhanced APK : %.2f\n', ...
+        100 * meanAPKEnhanced);
+
+    fprintf( ...
+        'APK change   : %.2f pp\n', ...
+        100 * (meanAPKEnhanced - meanAPKOriginal));
 
     fprintf('\n');
 
+    fprintf( ...
+        'Original PCK : %.2f\n', ...
+        100 * meanPCKOriginal);
 
     fprintf( ...
-        '%-15s %-12s %-12s %-12s %-12s %-12s %-12s\n', ...
-        'Condition', ...
-        'Orig APK', ...
-        'Enh APK', ...
-        'Delta APK', ...
-        'Orig PCK', ...
-        'Enh PCK', ...
-        'Delta PCK');
-
+        'Enhanced PCK : %.2f\n', ...
+        100 * meanPCKEnhanced);
 
     fprintf( ...
-        '------------------------------------------------------------\n');
+        'PCK change   : %.2f pp\n', ...
+        100 * (meanPCKEnhanced - meanPCKOriginal));
 
+end
 
-    for c = 1:length(conditions)
+% =========================================================
+% FINAL SUMMARY
+% =========================================================
 
-        condition = conditions{c};
+fprintf('\n\n');
 
-        r = results.(condition);
+fprintf( ...
+    '============================================================\n');
 
+fprintf( ...
+    '              FINAL ROBUSTNESS RESULTS\n');
 
-        fprintf( ...
-            '%-15s %10.2f %12.2f %12.2f %12.2f %12.2f %12.2f\n', ...
-            condition, ...
+fprintf( ...
+    '============================================================\n');
+
+fprintf('\n');
+
+fprintf( ...
+    '%-15s %-12s %-12s %-12s %-12s %-12s %-12s\n', ...
+    'Condition', ...
+    'Orig APK', ...
+    'Enh APK', ...
+    'Delta APK', ...
+    'Orig PCK', ...
+    'Enh PCK', ...
+    'Delta PCK');
+
+fprintf( ...
+    '------------------------------------------------------------\n');
+
+for c = 1:length(conditions)
+
+    condition = conditions{c};
+
+    r = results.(condition);
+
+    fprintf( ...
+        '%-15s %10.2f %12.2f %12.2f %12.2f %12.2f %12.2f\n', ...
+        condition, ...
+        100 * r.meanAPKOriginal, ...
+        100 * r.meanAPKEnhanced, ...
+        100 * r.meanAPKEnhanced - ...
             100 * r.meanAPKOriginal, ...
-            100 * r.meanAPKEnhanced, ...
-            100 * r.meanAPKEnhanced - ...
-                100 * r.meanAPKOriginal, ...
-            100 * r.meanPCKOriginal, ...
-            100 * r.meanPCKEnhanced, ...
-            100 * r.meanPCKEnhanced - ...
-                100 * r.meanPCKOriginal);
+        100 * r.meanPCKOriginal, ...
+        100 * r.meanPCKEnhanced, ...
+        100 * r.meanPCKEnhanced - ...
+            100 * r.meanPCKOriginal);
 
-    end
+end
 
+fprintf( ...
+    '============================================================\n');
 
-    fprintf( ...
-        '============================================================\n');
+% =========================================================
+% Save results
+% =========================================================
 
+outputFile = fullfile( ...
+    codeFullDir, ...
+    'degraded_results.mat');
 
-    %% =========================================================
-    % Save results
-    % ==========================================================
+save( ...
+    outputFile, ...
+    'results');
 
-    outputFile = fullfile( ...
-        codeFullDir, ...
-        'degraded_results.mat');
+fprintf('\n');
 
+fprintf( ...
+    'Results saved to:\n%s\n', ...
+    outputFile);
 
-    save( ...
-        outputFile, ...
-        'results');
+fprintf('\n');
 
-
-    fprintf('\n');
-
-    fprintf( ...
-        'Results saved to:\n%s\n', ...
-        outputFile);
-
-
-    fprintf('\n');
-    fprintf('Experiment completed successfully.\n');
+fprintf('Experiment completed successfully.\n');
 
 end

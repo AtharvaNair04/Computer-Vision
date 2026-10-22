@@ -51,6 +51,12 @@ det_enhanced = struct('obj', cell(1,numImages));
 % ---------------------------------------------------------
 % Process all test images
 % ---------------------------------------------------------
+countGamma = 0;
+countBrightness = 0;
+countContrast = 0;
+countNoise = 0;
+countSharpness = 0;
+countNoChange = 0;
 for i = 1:numImages
 
     fprintf('Processing %d/%d : %s\n', ...
@@ -72,6 +78,32 @@ for i = 1:numImages
     % ADAPTIVE PREPROCESSING + FMP
     % =====================================================
     [im_enhanced, info] = adaptive_preprocess_v2(im);
+    % Count preprocessing operations
+    for k = 1:length(info.operations)
+
+        op = info.operations{k};
+
+        if contains(op, 'gamma')
+            countGamma = countGamma + 1;
+
+        elseif contains(op, 'brightness')
+            countBrightness = countBrightness + 1;
+
+        elseif contains(op, 'contrast')
+            countContrast = countContrast + 1;
+
+        elseif contains(op, 'noise')
+            countNoise = countNoise + 1;
+
+        elseif contains(op, 'sharpness')
+            countSharpness = countSharpness + 1;
+        end
+
+    end
+
+    if info.numOperations == 0
+        countNoChange = countNoChange + 1;
+    end
 
     boxes_enhanced = detect_fast( ...
         im_enhanced, model, min(model.thresh,-1));
@@ -83,6 +115,17 @@ for i = 1:numImages
 end
 
 fprintf('\nAll images processed.\n');
+fprintf('\n========================================\n');
+fprintf(' PREPROCESSING STATISTICS\n');
+fprintf('========================================\n');
+
+fprintf('Total images          : %d\n', numImages);
+fprintf('Gamma correction      : %d\n', countGamma);
+fprintf('Brightness correction : %d\n', countBrightness);
+fprintf('Contrast enhancement  : %d\n', countContrast);
+fprintf('High noise detected   : %d\n', countNoise);
+fprintf('Low sharpness detected: %d\n', countSharpness);
+fprintf('No change             : %d\n', countNoChange);
 
 % ---------------------------------------------------------
 % Convert 26 FMP keypoints back to 14 PARSE keypoints
