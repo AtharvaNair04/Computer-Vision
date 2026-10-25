@@ -30,8 +30,7 @@ function demo_complete(imgIndex, degradationCondition)
     addpath(codeFullDir, '-begin');
     addpath(fullfile(codeFullDir, 'detection'), '-begin');
     addpath(fullfile(codeFullDir, 'visualization'), '-begin');
-    addpath(codeBasicDir);
-    addpath(fullfile(codeBasicDir, 'mex_pc'));
+    addpath(fullfile(codeFullDir, 'evaluation'), '-begin');
     globals;
 
     % Load model & ground truth
@@ -82,13 +81,14 @@ function demo_complete(imgIndex, degradationCondition)
     if ~isempty(detBase14.obj), ptsBase = detBase14.obj(1).point; end
     fprintf('  - Baseline detected in %.2f s\n', timeBase);
 
-    % 3. Adaptive Preprocessing + Adaptive HOG Feature Detection
-    fprintf('\n[Step 3B] Running Enhanced Pipeline (Adaptive Preprocessing + Adaptive HOG)...\n');
+    % 3. Adaptive Preprocessing + FMP with flip TTA and pose voting
+    fprintf('\n[Step 3B] Running Enhanced Pipeline (Preprocessing + Flip TTA + Pose Voting)...\n');
     tic;
-    boxesComb = adaptive_detect_fast(imEnhanced, model, model.thresh);
-    boxesComb = nms(boxesComb, 0.3);
+    boxesComb = enhanced_detect(im, model);
     timeComb = toc;
-    poseComb = box2obj(bestoverlap(boxesComb, test(imgIndex).obj(1), 0.3));
+    poseComb = [];
+    bestComb = bestoverlap(boxesComb, test(imgIndex).obj(1), 0.3);
+    if ~isempty(bestComb), poseComb = pose_vote(bestComb, boxesComb); end
     detComb14 = PARSE_transback(struct('obj', poseComb));
     ptsComb = [];
     if ~isempty(detComb14.obj), ptsComb = detComb14.obj(1).point; end

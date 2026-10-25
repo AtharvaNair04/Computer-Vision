@@ -1,4 +1,4 @@
-# Comprehensive Project Walkthrough, Technical Rationale, Empirical Gains, and Cross-Verification Guide
+# Project Walkthrough, Technical Rationale, Verified Results and Defence Guide
 
 **Project Title:** Improving Classical Human Pose Estimation Using Image Preprocessing and Adaptive Feature Extraction  
 **Team Details:** Group No: 1  
@@ -8,262 +8,242 @@
 - **Revathi V** (Roll No: `AM.SC.U4CSE23145`)  
 
 **Base Paper:**  
-Yi Yang and Deva Ramanan, *"Articulated Pose Estimation using Flexible Mixtures of Parts"*, IEEE Conference on Computer Vision and Pattern Recognition (CVPR), 2011.  
+Yi Yang and Deva Ramanan, *"Articulated Pose Estimation using Flexible Mixtures of Parts"*, IEEE CVPR 2011.  
 Official Base Repo: `https://github.com/yangyi02/human-pose-estimation`  
-Datasets: **PARSE Dataset** & **BUFFY Dataset** (with INRIA Person Background Dataset)
+Datasets: **PARSE** and **BUFFY** (INRIA Person is the negative set used for training)
+
+> All numbers in this document come from `code_full/run_final_evaluation.m` and `code_full/run_buffy_experiments.m` and can be reproduced exactly (Section 6). FMP inference is deterministic, so re-running gives identical numbers. The detailed results are in [`ENHANCED_PIPELINE_RESULTS.md`](ENHANCED_PIPELINE_RESULTS.md).
 
 ---
 
-## 1. The Starting Point: Why the Mid-Review Looked Like "Barely Any Changes"
+## 1. Development History
 
-In the mid-review presentation (Slides 1–16), the project faced critical issues that made the technical contribution appear shallow:
+The project went through three versions. The first two are kept in git history.
 
-1. **Stubbed / Inactive Preprocessing**:
-   In `adaptive_preprocess_v2.m`, noise and blur were literally detected but completely ignored:
-   ```matlab
-   if noiseLevel > 0.08
-       info.operations{end+1} = 'High noise detected - unchanged';
-   end
-   if sharpness < 0.001
-       info.operations{end+1} = 'Low sharpness detected - unchanged';
-   end
-   ```
-   Only mild gamma ($0.85$) and basic min-max contrast stretching were active. Half the promised preprocessing was missing.
-2. **Key Architectural Pillars Shelved into "Future Work"**:
-   - Adaptive HOG feature extraction was labeled as *"future work: requires retraining FMP"*.
-   - Anatomical pose refinement was labeled as *"future work for weak joints"*.
-   - Multi-dataset evaluation on BUFFY was marked as unexecuted.
-3. **Marginal or Regressive Metrics**:
-   - Clean images dropped by **$-0.22\text{ pp}$ APK** and **$-0.28\text{ pp}$ PCK**.
-   - Motion blur dropped by **$-0.10\text{ pp}$ APK**.
-   - Dark/Contrast only gained **$+0.37\text{ pp}$**, well within the random noise margin.
+### Version 1: mid-review
+* In `adaptive_preprocess_v2.m`, noise and blur were detected but not acted on (`'High noise detected - unchanged'`). Only mild gamma correction and min-max contrast stretching were active.
+* Adaptive HOG, pose refinement and BUFFY evaluation were listed as future work.
+* The metrics were flat or slightly negative: clean −0.28 pp PCK, blur −0.10 pp APK.
 
-Any academic evaluation panel or professor would legitimately criticize this as *"barely any changes with negligible effect"*.
+### Version 2: hand-calibrated preprocessing
+* Added a bilateral filter for noise, unsharp masking for blur, a dark-image gamma, and the anatomical pose refinement module.
+* It was evaluated on only 25 PARSE images. Its parameters were chosen while looking at those same test images.
+* **Its reported numbers cannot be reproduced.** The widely quoted "+50 pp PCK on noise" (14.29% → 64.29%) came from a results file written by a run on a **single image**. Every per-joint value in it is 0, 50 or 100. Re-run on 25 images, version 2 scored **below** the baseline on noise (−0.86 PCK), blur (−0.86) and low contrast (−0.86) and clean images (−0.57). Only dark images improved (+1.71).
+
+### Version 3: validated pipeline (current)
+* **Proper protocol:** PARSE test images **1–100** were used for every design decision. Images **101–205** were held out and only used for the final report. BUFFY was never used for tuning.
+* **Systematic search:** 15 image transforms × 5 conditions × 205 images were cached, and each preprocessing choice was decided by measured PCK rather than intuition.
+* **New stages:** a better noise estimator, NLM denoising, Richardson-Lucy deblurring, flip test-time augmentation and pose voting.
+* **Significance testing:** gains are reported with paired-bootstrap 95% confidence intervals.
 
 ---
 
-## 2. Root Cause Investigation: Computer Vision Insights (The "Why")
+## 2. Technical Rationale (the "why")
 
-Before writing code, we performed a deep empirical diagnosis to understand **why** classical computer vision models fail under naive preprocessing:
+### Finding 1: HOG already normalises contrast, so contrast enhancement does not help
+FMP's HOG features normalise each 2×2-cell block: $\mathbf{f} = \mathbf{v} / \sqrt{\|\mathbf{v}\|^2 + \epsilon}$. A global contrast change scales all gradients in a block equally and is therefore removed by this normalisation.
 
-### Finding 1: Feature Domain Mismatch with HOG
-* **The Mechanism**: Yang & Ramanan's FMP part filters ($\mathbf{w}$) were trained using a Structured Support Vector Machine (S-SVM) on **natural, raw gradient distributions** computed by Felzenszwalb's 32-channel HOG extractor.
-* **The Failure**: When standard CLAHE (`adapthisteq`) is applied, it divides the image into $8 \times 8$ contextual tiles. Between adjacent tiles, boundary step-discontinuities are created. HOG computes gradients over $8 \times 8$ pixel cells; those artificial tile seams create massive false gradient spikes in background regions that completely overpower the human body templates.
-* **The Fix**: HOG already performs local block energy normalization ($L_2\text{-hys}$):
-  $$\mathbf{f} = \frac{\mathbf{v}}{\sqrt{\|\mathbf{v}\|^2 + \epsilon}}$$
-  Because HOG naturally normalizes contrast variations, artificially stretching global contrast actually amplifies sensor noise. We preserved natural gradients for low-contrast images and restricted gamma enhancement strictly to truly underexposed images.
+Tested on the tuning split (low-contrast images, PCK): baseline 71.8, contrast stretch 70.2, gamma 71.1. **Conclusion:** low-contrast images are best left untouched. This is also why CLAHE from the original proposal was dropped.
 
-### Finding 2: Spatial Sigma vs. Thin Limb Width
-* **The Failure**: The initial bilateral filter used parameters `imbilatfilt(enhanced, 25, 7)`. A spatial sigma of $\sigma_s = 7$ spans a Gaussian window of $15 \times 15$ pixels ($\pm 2\sigma$). In the PARSE dataset, human forearms and calves are frequently only $8\text{--}12$ pixels wide. Blurring across 15 pixels obliterated the very edge gradients FMP part templates rely on to identify limbs!
-* **The Fix**: We calibrated $\sigma_s = 1.2$ (local $3 \times 3$ neighborhood) and photometric variance $\sigma_r^2 = 400$. This removes high-frequency Gaussian noise grain while keeping limb boundary edges razor sharp.
+### Finding 2: the noise estimator mattered as much as the denoiser
+Version 2 measured noise as std(I − Gauss(I, σ=1)). That measure responds to image texture as well as noise, so it fired on clean images and missed some noisy ones (it triggered on 18/25 noisy images).
 
-### Finding 3: Torso Scale Collapse in Kinematic Refinement
-* **The Failure**: The initial `refine_pose.m` computed torso scale as $d(\text{midShoulder}, \text{midHip})$. When noise or blur caused FMP to misdetect either shoulder or hip, the calculated torso scale collapsed or exploded, which then forced all the correctly predicted limbs into physically impossible positions! Furthermore, bounding Head and Neck relative to mid-shoulder displaced already-accurate head predictions (which naturally score $>88\%$ accuracy).
-* **The Fix**: 
-  1. We anchored the reference torso scale to the detected person's overall bounding box height:
-     $$S_{\text{prior}} \approx 0.30 \cdot H_{\text{person}}$$
-     If the detected torso length is outside $[0.18 H, 0.45 H]$, the system falls back to this robust anatomical prior.
-  2. We implemented **outlier-only gating** on Head & Neck, completely shielding accurate head predictions from artificial shifts while focusing kinematic corrections on wandering knees, elbows, and ankles.
+Version 3 uses **Immerkær's fast noise estimator** (1996). It convolves with a mask that cancels image structure up to second order, so it measures noise only. On all 205 PARSE images:
+* clean images: σ ≤ 9.2
+* noisy images: σ ≥ 9.9
 
----
+The two groups separate cleanly.
 
-## 3. What We Implemented from Beginning to End (The "What" and "How")
+### Finding 3: non-local means suits HOG better than a bilateral filter
+At the test noise level (σ ≈ 17 grey levels), a bilateral filter with σ_r = 20 either leaves grain or, with larger windows, smears thin limbs. Non-local means averages pixels from *similar patches* anywhere in a search window. It removes grain while keeping limb edges, which HOG's orientation bins depend on.
 
-### Module 1: Image Quality Analysis Engine ([`adaptive_preprocess.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/adaptive_preprocess.m))
-We measure 4 orthogonal image quality metrics on normalized double grayscale images:
-1. **Brightness ($\mu$)**: $\frac{1}{HW}\sum I(x,y)$
-2. **Contrast ($\sigma$)**: $\sqrt{\frac{1}{HW}\sum (I(x,y) - \mu)^2}$
-3. **Sensor Noise ($\sigma_n$)**: $\text{std}(I - \text{Gauss}(I, \sigma=1.0))$ (captures high-frequency noise residuals)
-4. **Sharpness ($s$)**: $\text{Var}(\nabla^2 I)$ using the 4-connected discrete Laplacian operator
+Tuning split, noise condition, PCK:
 
-### Module 2: Condition-Specific Adaptive Preprocessing ([`adaptive_preprocess.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/adaptive_preprocess.m))
-Intervention is strictly gated to avoid modifying clean natural images:
-* **Dark Images ($\mu < 0.12$)**:
-  $$\gamma = \max\left(0.60, \min\left(0.85, \frac{\mu}{0.15}\right)\right), \quad I_{\text{out}} = \text{imadjust}(I, [], [], \gamma)$$
-* **Severe Noise ($\sigma_n > 0.070$)**:
-  $$I_{\text{out}} = \text{imbilatfilt}(I, 400, 1.2)$$
-  Preserves structural limb edges while eliminating sensor grain.
-* **Motion / Optical Blur ($s < 0.0012$)**:
-  $$I_{\text{out}} = \text{imsharpen}(I, \text{'Radius'}, 1, \text{'Amount'}, 0.45, \text{'Threshold'}, 0.015)$$
-  Recovers edge gradient transitions without ringing or noise amplification.
-* **Clean Images ($\mu \ge 0.12, \sigma_n \le 0.070, s \ge 0.0012$)**:
-  $0\%$ modification. The image passes through completely untouched (`numOperations = 0`).
+| Method | PCK |
+|---|---|
+| Baseline | 67.4 |
+| Version 2 bilateral | 67.4 |
+| Median 3×3 | 68.3 |
+| Wiener 5×5 | 68.8 |
+| Gaussian σ 1 | 69.0 |
+| Strong bilateral | 69.1 |
+| **NLM** | **70.7** |
 
-### Module 3: Adaptive HOG Feature Extraction ([`adaptive_features.cc`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/adaptive_features.cc))
-Compiled high-performance C++ MEX feature extractor ([`adaptive_features.mexw64`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/mex_pc)) supporting dynamic gradient weighting and multi-scale pyramids ([`adaptive_featpyramid.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/adaptive_featpyramid.m)).
+### Finding 4: blur needs deconvolution, not sharpening
+Unsharp masking boosts edge contrast but cannot restore detail that the blur removed (tuning PCK: 65.9 vs baseline 66.1). Richardson-Lucy deconvolution inverts the blur model (Gaussian PSF, 8 iterations) and gives **68.3**.
 
-### Module 4: Classical FMP Inference Engine ([`detect_fast.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/detect_fast.m))
-The core 2011 Yang & Ramanan inference engine evaluates 26 part templates across feature pyramids using dynamic programming min-convolution distance transforms ([`dt.mexw64`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/mex_pc)), followed by Non-Maximum Suppression (NMS, $\text{IoU} = 0.3$).
+It hurts sharp images (69.0 vs 71.4 on clean), so it must be gated. The gate uses a **contrast-normalised Laplacian energy**, var(∇²I)/var(I), computed after light smoothing. This keeps low-contrast or noisy images from being mistaken for blurred ones.
 
-### Module 5: Anatomical Pose Refinement Layer ([`refine_pose.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/refine_pose.m))
-Applies post-inference kinematic sanity checks:
-1. **Bounding-Box Torso Scale Prior**: Robustly anchors human scale even if shoulders/hips are misdetected.
-2. **Anthropometric Bone Bounds (Drillis & Contini 1966; Winter 2009)**:
-   - Upper Arm: $[0.35, 0.90] \times \text{TorsoScale}$
-   - Forearm: $[0.30, 0.80] \times \text{TorsoScale}$
-   - Thigh: $[0.50, 1.20] \times \text{TorsoScale}$
-   - Calf: $[0.45, 1.15] \times \text{TorsoScale}$
-3. **Bilateral Symmetry Prior**: Blends asymmetric left/right limb lengths toward their mutual median (weight $= 0.35$).
-4. **Outlier Projection**: Disconnected keypoints are projected back along their anatomical bone vectors without altering limb angles.
+### Finding 5: FMP's single best configuration is noisy, so averaging helps
+FMP returns the highest-scoring pose. Many near-identical candidates with almost the same score exist, shifted by one HOG cell or using a different part mixture. Two additions exploit this:
+* **Flip test-time augmentation:** run the unchanged FMP on the mirrored image too, map those detections back (reflect x, swap left/right parts) and pool both sets.
+* **Pose voting:** replace each output joint by the score-weighted mean over candidates of the same person (IoU > 0.7, score within 0.25, weight $e^{(s_i - s^*)/0.1}$).
 
-### Module 6: Multi-Dataset Cross-Validation on BUFFY
-We downloaded and extracted the complete **BUFFY Dataset** (`data/BUFFY/` with all images, stickmen annotations, and labels) and built [`code_full/run_buffy_experiments.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_full/run_buffy_experiments.m) to benchmark the 10 upper-body keypoints across episodes.
+Under degradation these two stages add **+1.6 to +2.0 PCK** beyond preprocessing (held-out noise and blur). On held-out clean images they gave no gain.
+
+### Finding 6: anatomical refinement gives a small, consistent gain
+On top of voting, the bone-length bounds and symmetry prior add +0.1 to +0.7 PCK in every held-out condition (+0.26 on average on the tuning split). The robust torso-scale prior (0.30 × the vertical extent of the predicted keypoints) keeps one misdetected shoulder or hip from rescaling every limb.
+
+### Finding 7: Adaptive HOG does not help without retraining
+`adaptive_features` changes the feature distribution, but the FMP filters were trained on the original features. On every condition, accuracy stays within ±0.1 of the baseline.
+
+Retraining (`train_adaptive_fmp.m`) needs the full INRIA negative set (frames 615–1832), which is not in the repository. This remains the main open item.
 
 ---
 
-## 4. Empirical Benchmark Results & Quantitative Gains
+## 3. Final Pipeline (what is implemented)
 
-### A. Failure Case Recovery: Severe Sensor Noise
-When noise corrupts local pixel gradients, classical FMP completely collapses. Our pipeline restores detection:
-* **Baseline FMP**: $\text{PCK} = 14.29\%, \quad \text{APK} = 14.29\%$
-* **Proposed Pipeline**: $\text{PCK} = \mathbf{64.29\%} \; (\mathbf{+50.00\text{ pp}}), \quad \text{APK} = \mathbf{75.00\%} \; (\mathbf{+60.71\text{ pp}})$
+| Stage (abstract diagram) | File | Implementation |
+|---|---|---|
+| 1. Image-quality analysis | `code_full/image_quality.m` | brightness, robust contrast (1–99th percentile), Immerkær noise σ, contrast-normalised Laplacian sharpness |
+| 2. Adaptive preprocessing | `code_full/adaptive_preprocess.m` | at most one operation per image, priority noise > blur > dark:<br>• σ > 6 → NLM (`imnlmfilt`)<br>• sharpness < 0.014 → Richardson-Lucy (σ 1.5, 8 iterations)<br>• brightness < 0.40 → gamma 0.67<br>• otherwise unchanged |
+| 3. HOG pyramid | `code_full/detection/featpyramid.m` | original, unchanged |
+| 3b. Adaptive HOG (investigated) | `code_basic/adaptive_detect_fast.m` | reported as an ablation row only |
+| 4. FMP inference + flip TTA | `code_full/detect_tta.m` | original `detect_fast` on the image and its mirror; part mirror map `[1 2, side B, side A]` |
+| 4b. Pose voting | `code_full/pose_vote.m` | score-weighted keypoint averaging |
+| 5. Pose refinement | `code_full/refine_pose.m`, `apply_pose_refinement.m` | anthropometric bounds (Drillis & Contini 1966; Winter 2009) and symmetry prior |
+| 6–7. Visualisation / evaluation | `demo_complete.m`, `run_final_evaluation.m`, `run_buffy_experiments.m` | demo, ablation, bootstrap CIs, figures |
 
-### B. PARSE Adverse Condition Robustness Benchmarks
-| Degradation Condition | Baseline PCK | Proposed PCK | **PCK Gain** | Baseline APK | Proposed APK | **APK Gain** |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Severe Sensor Noise** | $14.29\%$ | $\mathbf{64.29\%}$ | $\mathbf{+50.00\text{ pp}}$ | $14.29\%$ | $\mathbf{75.00\%}$ | $\mathbf{+60.71\text{ pp}}$ |
-| **Dark Illumination** | $65.43\%$ | $\mathbf{67.14\%}$ | $\mathbf{+1.71\text{ pp}}$ | $57.55\%$ | $\mathbf{59.45\%}$ | $\mathbf{+1.91\text{ pp}}$ |
-| **Motion Blur** | $55.71\%$ | $\mathbf{57.86\%}$ | $\mathbf{+2.15\text{ pp}}$ | $57.27\%$ | $\mathbf{56.28\%}$ | $\mathbf{+2.15\text{ pp}}$ *(PCK)* |
-| **Low Contrast** | $69.14\%$ | $\mathbf{69.14\%}$ | $\mathbf{0.00\text{ pp}}$ | $64.29\%$ | $\mathbf{64.29\%}$ | $\mathbf{0.00\text{ pp}}$ |
-
-### C. Clean PARSE Benchmark (Zero-False-Positive Gating)
-| Method | Head | Shoulder | Elbow | Wrist | Hip | Knee | Ankle | **Mean PCK** | **Mean APK** |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Baseline FMP** | $88.0\%$ | $88.0\%$ | $60.0\%$ | $46.0\%$ | $78.0\%$ | $70.0\%$ | $60.0\%$ | **$70.00\%$** | **$61.03\%$** |
-| **Adaptive HOG** | $88.0\%$ | $88.0\%$ | $60.0\%$ | $46.0\%$ | $78.0\%$ | $70.0\%$ | $60.0\%$ | **$70.00\%$** | **$61.03\%$** |
-| **Proposed Refined** | $90.0\%$ | $86.0\%$ | $60.0\%$ | $42.0\%$ | $78.0\%$ | $\mathbf{72.0\%}$ | $56.0\%$ | **$69.14\%\text{--}70.48\%$** | **$60.30\%$** |
-
-*Outcome:* Clean baseline accuracy is $100\%$ preserved, while Knee accuracy improves ($70.0\% \rightarrow 72.0\%$) and Head accuracy reaches $90.0\%$.
-
-### D. BUFFY Dataset Cross-Validation (10 Upper-Body Keypoints)
-| Metric / Joint | Head | Shoulder | Elbow | Wrist | Hip | **Average Score** | **Net Gain** |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **PCK Baseline** | $100.0\%$ | $100.0\%$ | $86.7\%$ | $73.3\%$ | $56.7\%$ | **$83.33\%$** | — |
-| **PCK Proposed** | $100.0\%$ | $100.0\%$ | $86.7\%$ | $73.3\%$ | $\mathbf{60.0\%}$ | **$\mathbf{84.00\%}$** | **$\mathbf{+0.67\text{ pp}}$** |
-| **APK Baseline** | $100.0\%$ | $100.0\%$ | $85.0\%$ | $60.4\%$ | $38.2\%$ | **$76.72\%$** | — |
-| **APK Proposed** | $100.0\%$ | $100.0\%$ | $84.9\%$ | $\mathbf{61.4\%}$ | $\mathbf{42.5\%}$ | **$\mathbf{77.74\%}$** | **$\mathbf{+1.02\text{ pp}}$** |
-
-*Outcome:* Generalization confirmed on a second dataset: Hip accuracy jumps by **$+4.3\text{ pp}$ APK** ($+3.3\text{ pp}$ PCK), and Wrist accuracy improves by **$+1.0\text{ pp}$ APK**.
-
-### E. Component-by-Component Ablation Study
-$$\text{Baseline FMP (65.43\% PCK)} \xrightarrow{+\text{Preprocessing}} \text{65.71\% PCK} \xrightarrow{+\text{Pose Refinement}} \mathbf{67.14\%\text{ PCK (Ours Full)}}$$
-
-### F. Runtime & Computational Complexity Benchmark
-| Pipeline Stage | Measured Latency | Percentage of Total Latency |
-| :--- | :---: | :---: |
-| **1. Image Quality Analysis** | **$13.35\text{ ms}$** | $0.55\%$ |
-| **2. Adaptive Preprocessing (when triggered)** | **$22.09\text{ ms}$** | $0.91\%$ |
-| **3. Anatomical Pose Refinement** | **$7.21\text{ ms}$** | $0.30\%$ |
-| **4. Classical FMP Inference Engine** | $2393.29\text{ ms}$ | $98.24\%$ |
-| **Total System Latency** | **$2435.94\text{ ms}$** | **$100.0\%$** |
-
-*Takeaway:* Total enhancement layer overhead is **$42.6\text{ ms}$** ($< 1.8\%$ of total runtime), proving that high robustness can be achieved without GPUs.
+`code_full/enhanced_detect.m` chains stages 1–4. The tuning experiments are in `code_full/tuning/`.
 
 ---
 
-## 5. Execution Guide: How to Run Everything
+## 4. Verified Results
 
-### Step 1: Open MATLAB and Move to Project Directory
+### A. PARSE held-out images 101–205 (N = 105), PCK %
+
+| Condition | Baseline FMP | Adaptive HOG | + Preprocess | + Flip TTA / Vote | **Full** | Full − Baseline [95% CI] |
+|---|---|---|---|---|---|---|
+| Clean | 75.37 | 75.44 | 74.83 | 74.42 | **75.10** | −0.27 [−2.93, +1.97] |
+| Dark | 75.51 | 75.51 | 74.76 | 76.94 | **77.28** | +1.77 [−0.65, +4.15] |
+| Low contrast | 74.76 | 74.69 | 74.49 | 74.69 | **75.10** | +0.34 [−1.90, +2.31] |
+| Noise | 68.78 | 68.64 | 71.02 | 72.65 | **72.79** | **+4.01 [+0.75, +7.21]** |
+| Blur | 68.91 | 68.91 | 71.16 | 73.13 | **73.40** | **+4.49 [+1.77, +7.69]** |
+
+### B. PARSE held-out images 101–205, APK %
+
+| Condition | Baseline | Full | Δ |
+|---|---|---|---|
+| Clean | 66.19 | 66.28 | +0.09 |
+| Dark | 67.13 | 68.24 | +1.11 |
+| Low contrast | 66.28 | 67.37 | +1.09 |
+| Noise | 57.26 | 63.10 | **+5.84** |
+| Blur | 57.43 | 65.30 | **+7.87** |
+
+### C. Per-joint PCK, clean held-out images (Baseline → Full)
+
+| Head | Shoulder | Elbow | Wrist | Hip | Knee | Ankle |
+|---|---|---|---|---|---|---|
+| 91.9 → 88.6 | 88.6 → 88.6 | 68.6 → **72.4** | 51.4 → 44.8 | 80.0 → **81.4** | 77.6 → 77.1 | 69.5 → **72.9** |
+
+On clean images the pipeline trades accuracy between joints (elbow and ankle up; head and wrist down), so the net change is zero.
+
+### D. BUFFY cross-dataset (all 276 test frames, no tuning on BUFFY)
+
+| Metric | Head | Shoulder | Elbow | Wrist | Hip | **Average** |
+|---|---|---|---|---|---|---|
+| PCK baseline | 96.0 | 97.1 | 87.5 | 67.2 | 85.3 | 86.63 |
+| PCK enhanced | 96.2 | 97.1 | 90.0 | 71.4 | 90.2 | **88.99 (+2.36)** |
+| APK baseline | 88.3 | 88.8 | 78.8 | 56.7 | 71.5 | 76.82 |
+| APK enhanced | 88.5 | 89.1 | 82.0 | 59.8 | 77.5 | **79.40 (+2.59)** |
+
+BUFFY uses preprocessing + flip TTA + voting. Refinement is defined for PARSE's 14 joints, so it is not applied here.
+
+### E. Runtime (single MATLAB process, `demo_complete`)
+
+| Stage | Time per image |
+|---|---|
+| Quality analysis + restoration | ≈ 0.13 s (NLM is the most expensive operation) |
+| FMP inference, one pass | ≈ 1.2–1.3 s |
+| FMP inference with flip TTA (two passes) | ≈ 2.3–2.4 s |
+| Voting + refinement | < 0.01 s |
+| **Baseline total / Enhanced total** | **≈ 1.3 s / ≈ 2.4 s** |
+
+The flip pass doubles inference time. Preprocessing on its own is nearly free and still gives +2.2 PCK on noise and blur.
+
+### F. Summary of what the evidence supports
+* **Significant (CI excludes 0):** noise +4.0 PCK / +5.8 APK; blur +4.5 PCK / +7.9 APK.
+* **Positive, not significant at N = 105:** dark +1.8 PCK; low contrast +0.3 PCK / +1.1 APK.
+* **No regression:** clean −0.3 PCK / +0.1 APK.
+* **Generalises:** BUFFY +2.4 PCK / +2.6 APK without any tuning there.
+
+---
+
+## 5. Likely Viva Questions and Answers
+
+**Q1. How do you know you did not overfit the test set?**  
+Every threshold and operator was chosen on PARSE test images 1–100. The headline numbers are on images 101–205, which were never used for any decision, plus BUFFY, which was never tuned on. On the clean condition, flip TTA looked like +3 PCK on the tuning split but gave nothing on the held-out split. We report that honestly, and it shows the protocol works.
+
+**Q2. Your degradations are synthetic. Would this work on real images?**  
+Partly. The noise and darkness gates use generic statistics (Immerkær σ, mean luminance), and BUFFY consists of real TV frames where the pipeline gained +2.4 PCK. The deblurring assumes a Gaussian PSF of σ 1.5, which matches our synthetic blur. Real motion blur would need PSF estimation, for example blind deconvolution. That is a stated limitation.
+
+**Q3. Why did adaptive HOG not help, when it was in the proposal?**  
+FMP's part filters are linear classifiers trained on the original HOG distribution. Changing the features at test time without retraining moves them away from what the filters expect, so accuracy stays at the baseline (±0.1). The retraining code exists (`train_adaptive_fmp.m`), but it needs the full INRIA negative set. We report adaptive HOG as an investigated and negative result.
+
+**Q4. Is a 4-point gain meaningful?**  
+For a fixed 2011 model with no retraining, yes. It recovers about 60% of the drop that noise causes (clean 75.4 → noisy 68.8 → enhanced 72.8) and about 70% for blur. The bootstrap intervals exclude zero.
+
+**Q5. What does flip TTA cost, and is it still "lightweight"?**  
+It doubles FMP inference (≈ 1.3 s → 2.4 s per image on CPU) but needs no GPU and no new training. If cost matters, preprocessing alone keeps about half of the gain at almost no extra cost.
+
+---
+
+## 6. How to Run Everything
+
 ```matlab
 cd 'c:\Users\athar\Desktop\Computer-Vision\human-pose-estimation-master - enhanced\code_full'
-```
 
-### Step 2: Run the Complete Automated Evaluation Suite
-To run the full 5-model evaluation across Clean, Dark, Low-Contrast, Noise, and Blur sets and generate all publication charts:
-```matlab
-% Evaluates 25 images per condition (fast, representative benchmark)
-results = run_complete_experiments(25, 25);
-```
-All charts are automatically saved to `../figures/`:
-* `figures/robustness_comparison_pck.png`
-* `figures/robustness_comparison_apk.png`
-* `figures/keypoint_breakdown_clean.png`
-* `figures/pck_threshold_curves.png`
-* `figures/qualitative_comparison_*.png`
+% PARSE ablation on the held-out split (cached per image in cache/final/)
+results = run_final_evaluation(101:205);     % or run_complete_experiments()
 
-### Step 3: Run the Live Interactive Presentation Demo
-To demonstrate the before/after skeleton overlay on any specific test image:
-```matlab
-% Run on dark image
-demo_complete(1, 'dark');
+% Faster: run detection in 5 MATLAB windows in parallel, then the metrics
+%   window k (k = 1..5):  run_final_evaluation(1:205, 'shard', [k 5])
+%   afterwards:           run_final_evaluation(101:205)
 
-% Run on noisy image
-demo_complete(1, 'noise');
+% BUFFY cross-dataset benchmark (all 276 test frames)
+buffy = run_buffy_experiments();
 
-% Run on blurred image
+% Live demo (4 panels: input, baseline, enhanced, refined)
+demo_complete(4, 'noise');
 demo_complete(1, 'blur');
+demo_complete(1, 'dark');
 ```
-This immediately opens a 4-panel visual comparison:
-1. `(1) Input (Degraded)`
-2. `(2) Baseline FMP Skeleton` (showing failure)
-3. `(3) Enhanced FMP Image` (showing recovered gradient boundaries)
-4. `(4) Refined Pose (Ours)` (showing corrected kinematic joints)
 
-### Step 4: Run the BUFFY Dataset Cross-Validation
-```matlab
-% Evaluates 15 BUFFY test images across the 10 upper-body joints
-buffy_results = run_buffy_experiments(15);
-```
+Figures produced (in `figures/`):
+* `final_pck_by_condition.png`, `final_apk_by_condition.png`: ablation bar charts
+* `final_per_joint_clean.png`: per-joint PCK on clean images
+* `final_pck_curves.png`: PCK vs. threshold for each condition
+* `final_qualitative.png`: the largest per-condition improvement, baseline vs. full pipeline
+
+The older `robustness_comparison_*.png`, `keypoint_breakdown_clean.png`, `pck_threshold_curves.png` and `qualitative_comparison_*.png` come from the 25-image version-2 evaluation and are superseded.
 
 ---
 
-## 6. Claude Pro Prompt for Independent Cross-Verification
+## 7. Prompt for Independent Review
 
-You can copy and paste the exact prompt below into **Claude Pro / Claude Opus** to independently verify the methodology, mathematical equations, computer vision rationale, and empirical findings.
+Paste the block below into another model or give it to a reviewer to check the work:
 
 ```text
-You are an expert Computer Vision Researcher and Peer Reviewer for IEEE CVPR / TPAMI.
+You are a computer vision reviewer. Evaluate this undergraduate project that enhances the classical
+Flexible Mixtures-of-Parts (FMP) pose estimator (Yang & Ramanan, CVPR 2011) without retraining it.
 
-I need you to thoroughly evaluate and cross-verify an engineering and scientific enhancement of the classical Flexible Mixtures-of-Parts (FMP) human pose estimation framework (Yang & Ramanan, CVPR 2011).
+Pipeline: (1) no-reference quality analysis: Immerkaer noise sigma, mean brightness, robust contrast,
+contrast-normalised Laplacian sharpness; (2) one gated restoration per image: noise sigma > 6 ->
+non-local-means; sharpness < 0.014 -> Richardson-Lucy deconvolution (Gaussian PSF sigma 1.5); brightness
+< 0.40 -> gamma 0.67; (3-4) unchanged HOG + FMP inference on the image and its mirror, detections pooled;
+(4b) score-weighted pose voting over near-duplicate candidates (IoU > 0.7, score within 0.25, T = 0.1);
+(5) anthropometric bone-length and symmetry refinement.
 
-### Background & Context:
-Classical FMP uses handcrafted 32-channel HOG feature pyramids, spatial spring deformation trees, and dynamic programming for inference. While interpretable and CPU-friendly, FMP is notorious for:
-1. Catastrophic collapse under sensor noise (Gaussian noise scrambles cell gradient orientations).
-2. Missed parts under low illumination (weak gradient contrast).
-3. Soft edge degradation under motion blur.
-4. Drift in weak extremity joints (wrists and ankles lack global kinematic bounding).
+Protocol: PARSE test images 1-100 used for all tuning; 101-205 held out; BUFFY (276 frames) not tuned on.
+Degradations are synthetic: dark (gamma 1.5), low contrast, Gaussian noise (var 0.01), Gaussian blur (sigma 1.5).
 
-### Proposed 7-Stage Architecture:
-1. Image Quality Analysis: Brightness μ, Contrast σ, High-frequency residual noise std(I - Gauss(I, σ=1.0)), and Laplacian variance Var(∇²I).
-2. Adaptive Condition-Specific Preprocessing:
-   - Very Dark (μ < 0.12): Dynamic log-gamma correction γ = max(0.60, min(0.85, μ / 0.15)).
-   - High Noise (std_noise > 0.070): Edge-preserving bilateral filter with tight spatial window σ_s = 1.2 and photometric variance σ_r² = 400.
-   - Blur (Var(Laplacian) < 0.0012): Thresholded unsharp crispening (Amount = 0.45, Radius = 1.0, Threshold = 0.015).
-   - Low Contrast / Clean: Zero-touch pass-through. CLAHE was specifically rejected because HOG's native L2-Hys block energy normalization already handles uniform contrast scaling, whereas 8x8 CLAHE tiles introduce artificial boundary seams.
-3. Multi-Scale HOG Feature Pyramid: 32-channel Felzenszwalb HOG features with 10 scales per octave.
-4. FMP Part Inference: 26 part mixture templates with min-convolution distance transforms (dt.mexw64).
-5. Anatomical Kinematic Pose Refinement:
-   - Robust Torso Scale Prior: Anchored to 30% of detected bounding-box person height (guarding against torso scale collapse when shoulders/hips are misdetected).
-   - Anthropometric Bone Length Bounds (Drillis & Contini 1966; Winter 2009): Upper Arm [0.35, 0.90], Forearm [0.30, 0.80], Thigh [0.50, 1.20], Calf [0.45, 1.15] relative to torso scale.
-   - Bilateral Left-Right Symmetry Prior (weight = 0.35).
-   - Outlier-Gated Clamping on Kinematic Vectors (Head & Neck are outlier-gated to protect baseline >88% head accuracy).
-6. Multi-Dataset Evaluation: Tested on PARSE (clean and degraded sets) and BUFFY (upper-body 10 joints).
+Held-out PARSE PCK (baseline -> full, 95% bootstrap CI of change): clean 75.37 -> 75.10 [-2.93, +1.97];
+dark 75.51 -> 77.28 [-0.65, +4.15]; low contrast 74.76 -> 75.10 [-1.90, +2.31];
+noise 68.78 -> 72.79 [+0.75, +7.21]; blur 68.91 -> 73.40 [+1.77, +7.69].
+Held-out APK: noise +5.84, blur +7.87, dark +1.11, low contrast +1.09, clean +0.09.
+BUFFY: PCK 86.63 -> 88.99, APK 76.82 -> 79.40. Runtime ~1.3 s -> ~2.4 s per image (flip doubles inference).
+Adaptive HOG features without retraining: no change (+/-0.1).
 
-### Empirical Results Obtained:
-1. Severe Sensor Noise: Baseline FMP PCK = 14.29%, APK = 14.29% -> Proposed PCK = 64.29% (+50.00 pp), APK = 75.00% (+60.71 pp).
-2. Dark Illumination: Baseline PCK = 65.43%, APK = 57.55% -> Proposed PCK = 67.14% (+1.71 pp), APK = 59.45% (+1.91 pp).
-3. Motion Blur: Baseline PCK = 55.71% -> Proposed PCK = 57.86% (+2.15 pp).
-4. Clean PARSE Set: Baseline PCK = 70.00% -> Proposed PCK = 70.48% (+0.48 pp, Knee +2.0%, Head 90%).
-5. BUFFY Cross-Validation: Baseline PCK = 83.33%, APK = 76.72% -> Proposed PCK = 84.00% (+0.67 pp), APK = 77.74% (+1.02 pp, Hip APK +4.3 pp).
-6. Latency Overhead: Preprocessing (22.09 ms) + Quality Analysis (13.35 ms) + Refinement (7.21 ms) vs FMP Inference (2393.29 ms). Total overhead is < 1.8%.
-
-### Please review and evaluate:
-1. Is the technical rationale sound? Specifically, why did naive CLAHE and large spatial sigma bilateral filtering hurt classical HOG matching, and does the proposed fix make theoretical sense?
-2. Is the anatomical pose refinement mathematically and biomechanically valid? Is the use of bounding-box height prior justified to prevent torso scale collapse?
-3. How significant is the +50.00 pp gain on severe noise? Is this considered a breakthrough for classical part-based models?
-4. Does this project fulfill the standard requirements of a high-scoring undergraduate computer vision capstone / research project?
-5. What are 3 potential questions a tough viva/defense examiner might ask about this work, and what are the best answers to give?
+Please assess: soundness of the protocol, whether the conclusions follow from the numbers, the main
+threats to validity, and what further experiment would most strengthen the work.
 ```
-
----
-
-## 7. Summary of Files Saved in Repository
-
-1. **[`PROJECT_CHECKPOINT_REPORT.md`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/PROJECT_CHECKPOINT_REPORT.md)**: Master project checkpoint and technical documentation.
-2. **[`COMPLETE_PROJECT_WALKTHROUGH_AND_VERIFICATION.md`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/COMPLETE_PROJECT_WALKTHROUGH_AND_VERIFICATION.md)**: This complete walkthrough, rationale, execution guide, and cross-verification prompt.
-3. **[`code_basic/adaptive_preprocess.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/adaptive_preprocess.m)**: Calibrated adaptive preprocessing engine.
-4. **[`code_basic/refine_pose.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_basic/refine_pose.m)**: Biomechanical pose refinement module.
-5. **[`code_full/run_complete_experiments.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_full/run_complete_experiments.m)**: Automated 5-configuration evaluation suite.
-6. **[`code_full/run_buffy_experiments.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_full/run_buffy_experiments.m)**: BUFFY dataset cross-validation benchmark.
-7. **[`code_full/demo_complete.m`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/code_full/demo_complete.m)**: Interactive 4-panel presentation demo.
-8. **[`figures/`](file:///c:/Users/athar/Desktop/Computer-Vision/human-pose-estimation-master%20-%20enhanced/figures)**: 8 publication-grade charts and qualitative comparison figures.

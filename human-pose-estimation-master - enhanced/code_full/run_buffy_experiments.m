@@ -4,7 +4,7 @@ function results = run_buffy_experiments(numTestImages)
 % Protocol: 10 Upper-Body Keypoints (Head, Shoulder, Elbow, Wrist, Hip)
 
     if nargin < 1 || isempty(numTestImages)
-        numTestImages = 25;
+        numTestImages = inf;   % all BUFFY test frames
     end
 
     clc;
@@ -12,10 +12,10 @@ function results = run_buffy_experiments(numTestImages)
     fprintf('  BUFFY DATASET BENCHMARK: BASELINE vs. ENHANCED FMP PIPELINE\n');
     fprintf('========================================================================\n\n');
 
+    % code_full must shadow code_basic (both define adaptive_preprocess etc.)
+    cd(fileparts(mfilename('fullpath')));
+    addpath(pwd, '-begin');
     globals;
-    addpath(fullfile('..', 'code_basic'));
-    addpath(fullfile('..', 'code_basic', 'mex_pc'));
-    addpath(fullfile('mex_pc'));
 
     % Load BUFFY Model
     modelFile = fullfile('..', 'code_basic', 'BUFFY_model.mat');
@@ -52,14 +52,20 @@ function results = run_buffy_experiments(numTestImages)
             detBaseRaw(n).obj = box2obj(bBase);
         end
 
-        % 2. Enhanced (Adaptive Preprocessing + FMP)
-        [imEnh, ~] = adaptive_preprocess(im);
-        bEnh = detect_fast(imEnh, model, model.thresh);
+        % 2. Enhanced (Adaptive Preprocessing + Flip TTA + Pose Voting).
+        %    Thresholds were tuned on PARSE only, so this is a cross-dataset
+        %    test. Anatomical refinement is PARSE-specific (14 joints) and
+        %    is not applied to the 10 BUFFY upper-body joints.
+        bEnh = enhanced_detect(im, model);
         if ~isempty(bEnh)
             bestBoxE = bestoverlap(bEnh, gtObj, 0.2);
-            if ~isempty(bestBoxE), poseEnhRaw(n).obj = box2obj(bestBoxE); end
-            bEnh = nms(bEnh, 0.2);
-            detEnhRaw(n).obj = box2obj(bEnh);
+            if ~isempty(bestBoxE), poseEnhRaw(n).obj = pose_vote(bestBoxE, bEnh); end
+            top = nms(bEnh, 0.2);
+            objs = [];
+            for t = 1:size(top, 1)
+                objs = [objs, pose_vote(top(t, :), bEnh)]; %#ok<AGROW>
+            end
+            detEnhRaw(n).obj = objs;
         end
 
         if mod(n, 5) == 0 || n == numTest
