@@ -43,6 +43,12 @@ function [out, scale, flipped] = tune_transform(im, variant)
         case 'up125'
             scale = 1.25;
             out = imresize(im, scale, 'bicubic');
+        case 'clahe'
+            out = on_luminance(im, @(L) adapthisteq(L, 'NumTiles', [8 8], 'ClipLimit', 0.01));
+        case 'histeq'
+            out = on_luminance(im, @histeq);
+        case 'gated'
+            out = adaptive_preprocess(im);           % final quality-gated restoration
         otherwise
             error('Unknown variant: %s', variant);
     end
@@ -50,6 +56,14 @@ function [out, scale, flipped] = tune_transform(im, variant)
     if flipped
         out = out(:, end:-1:1, :);
     end
+end
+
+function out = on_luminance(im, f)
+% Apply an equalisation to the L* channel only, keeping colour.
+    lab = rgb2lab(im);
+    L = lab(:,:,1) / 100;
+    lab(:,:,1) = 100 * f(L);
+    out = lab2rgb(lab, 'OutputType', 'uint8');
 end
 
 function out = medfilt_rgb(im, k)

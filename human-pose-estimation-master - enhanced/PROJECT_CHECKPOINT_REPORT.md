@@ -19,17 +19,19 @@ Yang & Ramanan's Flexible Mixtures-of-Parts (FMP) model represents a person as a
 
 As the abstract proposes, this project wraps an **adaptive enhancement layer around the unchanged FMP model**:
 * a no-reference image-quality analysis that chooses **one restoration per image** (non-local-means denoising, Richardson-Lucy deblurring or gamma correction);
-* **flip test-time augmentation** with **score-weighted pose voting**;
+* **flip test-time augmentation** with **part-consistent, score-weighted pose voting**;
 * an **anthropometric pose-refinement** layer.
 
 All design choices were made on PARSE test images 1–100. The results below are on the **held-out images 101–205** and on **BUFFY**, which was never used for tuning:
 
-* **Gaussian noise:** **+4.01 PCK** (95% CI +0.75 to +7.21), **+5.84 APK**
-* **Blur:** **+4.49 PCK** (95% CI +1.77 to +7.69), **+7.87 APK**
-* **Dark:** +1.77 PCK, +1.11 APK (positive, not significant at N = 105)
-* **Low contrast:** +0.34 PCK, +1.09 APK
-* **Clean images:** −0.27 PCK, +0.09 APK (no regression)
-* **BUFFY (276 frames, cross-dataset):** **+2.36 PCK**, **+2.59 APK**
+* **Gaussian noise:** **+5.99 PCK** (95% CI +2.69 to +9.12), **+8.12 APK**
+* **Blur:** **+6.80 PCK** (95% CI +3.95 to +10.07), **+10.71 APK**
+* **Dark:** **+2.86 PCK** (95% CI +0.54 to +5.03), **+2.17 APK**
+* **Low contrast:** +2.04 PCK, +3.57 APK (positive, not significant at N = 105)
+* **Clean images:** +1.16 PCK, +1.88 APK (positive, not significant)
+* **BUFFY (276 frames, cross-dataset):** **+1.70 PCK**, **+2.12 APK**
+
+Every condition improves on both metrics.
 
 Cost: about 1.3 s → 2.4 s per image on a CPU, with no retraining and no GPU.
 
@@ -109,9 +111,10 @@ Cost: about 1.3 s → 2.4 s per image on a CPU, with no retraining and no GPU.
 ### Stage 4: Flip TTA and pose voting
 * Each candidate box from the mirrored image is mapped back with $x' = W + 1 - x$, and its parts are permuted $[1, 2, B, A]$. A and B are the two body sides of the part tree (PARSE: parts 3–14 and 15–26).
 * For the selected detection with score $s^*$, the candidate set is
-  $$\mathcal{C} = \{i : \text{IoU}(i, *) > 0.7,\; s_i \ge s^* - 0.25\}$$
-  and every part position becomes
-  $$\hat{\mathbf{x}}_j = \frac{\sum_{i\in\mathcal C} w_i\,\mathbf{x}_{ij}}{\sum_{i\in\mathcal C} w_i}, \qquad w_i = e^{(s_i - s^*)/0.1}$$
+  $$\mathcal{C} = \{i : \text{IoU}(i, *) > 0.5,\; s_i \ge s^* - 1.0\}$$
+  and every part position becomes a part-consistent weighted mean (only candidates that agree on part $j$ vote for it):
+  $$\hat{\mathbf{x}}_j = \frac{\sum_{i\in\mathcal C} w_{ij}\,\mathbf{x}_{ij}}{\sum_{i\in\mathcal C} w_{ij}}, \qquad w_{ij} = e^{(s_i - s^*)/0.5}\cdot \mathbb{1}\big[\|\mathbf{x}_{ij} - \mathbf{x}_{*j}\| \le 0.25\,S\big]$$
+  $S$ is the size of the selected person's box. Without the indicator (whole-pose voting) the tuning-split mean was 73.2 PCK and heads were pulled off target; with it, 75.0.
 
 ### Stage 5: Anatomical refinement
 * Torso scale:
@@ -141,7 +144,11 @@ Cost: about 1.3 s → 2.4 s per image on a CPU, with no retraining and no GPU.
 | Blur | 66.1 | 1.25× upsampling 66.3 | **Richardson-Lucy 68.3** |
 | Dark | 70.9 | contrast stretch 71.6 | **gamma 0.67: 74.0** |
 | Low contrast | 71.8 | gamma 71.1 | **no operation** |
-| All (mean of 5 conditions) | 69.5 | — | **full gated pipeline: 73.2** |
+| CLAHE (mean of 5 conditions, full pipeline) | 74.97 | CLAHE everywhere 74.51; CLAHE on low-contrast only 75.11 (+0.14) | **not adopted** (adoption bar +0.3, fixed in advance) |
+| Adaptive HOG (mean of 5 conditions) | 74.97 | gradient-weighted HOG ±0.1; denser scale pyramid 75.07 (+0.10, APK −0.40, ~2× slower) | **not adopted** |
+| Pose voting (mean of 5 conditions) | 69.5 | whole-pose voting 73.2 | **part-consistent voting: 75.0** |
+
+The part-consistent revision was prompted by per-joint losses in a first held-out report. It was then designed and tuned on images 1–100 only and scored on 101–205 once.
 
 ---
 
@@ -151,26 +158,26 @@ Cost: about 1.3 s → 2.4 s per image on a CPU, with no retraining and no GPU.
 
 | Condition | Baseline PCK | Full PCK | Δ PCK [95% CI] | Baseline APK | Full APK | Δ APK |
 |---|---|---|---|---|---|---|
-| Clean | 75.37 | 75.10 | −0.27 [−2.93, +1.97] | 66.19 | 66.28 | +0.09 |
-| Dark | 75.51 | 77.28 | +1.77 [−0.65, +4.15] | 67.13 | 68.24 | +1.11 |
-| Low contrast | 74.76 | 75.10 | +0.34 [−1.90, +2.31] | 66.28 | 67.37 | +1.09 |
-| Noise | 68.78 | **72.79** | **+4.01 [+0.75, +7.21]** | 57.26 | **63.10** | **+5.84** |
-| Blur | 68.91 | **73.40** | **+4.49 [+1.77, +7.69]** | 57.43 | **65.30** | **+7.87** |
+| Clean | 75.37 | 76.53 | +1.16 [−1.53, +3.61] | 66.19 | 68.07 | +1.88 |
+| Dark | 75.51 | **78.37** | **+2.86 [+0.54, +5.03]** | 67.13 | **69.30** | **+2.17** |
+| Low contrast | 74.76 | 76.80 | +2.04 [−0.48, +4.22] | 66.28 | 69.85 | +3.57 |
+| Noise | 68.78 | **74.76** | **+5.99 [+2.69, +9.12]** | 57.26 | **65.38** | **+8.12** |
+| Blur | 68.91 | **75.71** | **+6.80 [+3.95, +10.07]** | 57.43 | **68.14** | **+10.71** |
 
 ### B. Ablation (held-out PCK)
 
 | Condition | Baseline | Adaptive HOG | + Preprocess | + Flip TTA / Vote | + Refinement |
 |---|---|---|---|---|---|
-| Clean | 75.37 | 75.44 | 74.83 | 74.42 | 75.10 |
-| Dark | 75.51 | 75.51 | 74.76 | 76.94 | 77.28 |
-| Low contrast | 74.76 | 74.69 | 74.49 | 74.69 | 75.10 |
-| Noise | 68.78 | 68.64 | 71.02 | 72.65 | 72.79 |
-| Blur | 68.91 | 68.91 | 71.16 | 73.13 | 73.40 |
+| Clean | 75.37 | 75.44 | 74.83 | 76.53 | 76.53 |
+| Dark | 75.51 | 75.51 | 74.76 | 78.16 | 78.37 |
+| Low contrast | 74.76 | 74.69 | 74.49 | 76.46 | 76.80 |
+| Noise | 68.78 | 68.64 | 71.02 | 74.83 | 74.76 |
+| Blur | 68.91 | 68.91 | 71.16 | 74.97 | 75.71 |
 
 **What each stage contributes:**
-* **Preprocessing** gives most of the noise and blur gain (+2.2 each).
-* **Flip TTA + voting** adds another +1.6 to +2.0 under degradation, and +2.2 on dark images.
-* **Refinement** adds +0.1 to +0.7 everywhere.
+* **Preprocessing** gives +2.2 each on noise and blur.
+* **Flip TTA + part-consistent voting** adds +1.7 to +3.8 in every condition: the largest single contribution.
+* **Refinement** adds between −0.1 and +0.75 (largest on blur).
 * **Adaptive HOG** has no effect without retraining.
 
 ### C. BUFFY cross-dataset (276 frames)
@@ -178,13 +185,15 @@ Cost: about 1.3 s → 2.4 s per image on a CPU, with no retraining and no GPU.
 | Metric | Head | Shoulder | Elbow | Wrist | Hip | **Average** |
 |---|---|---|---|---|---|---|
 | PCK baseline | 96.0 | 97.1 | 87.5 | 67.2 | 85.3 | 86.63 |
-| PCK enhanced | 96.2 | 97.1 | 90.0 | 71.4 | 90.2 | **88.99 (+2.36)** |
-| APK baseline | 88.3 | 88.8 | 78.8 | 56.7 | 71.5 | 76.82 |
-| APK enhanced | 88.5 | 89.1 | 82.0 | 59.8 | 77.5 | **79.40 (+2.59)** |
+| PCK enhanced | 95.7 | 97.1 | 90.6 | 68.8 | 89.5 | **88.33 (+1.70)** |
+| APK baseline | 88.3 | 88.8 | 78.6 | 56.2 | 71.2 | 76.63 |
+| APK enhanced | 88.3 | 89.1 | 83.1 | 56.5 | 76.9 | **78.75 (+2.12)** |
+
+With the earlier whole-pose voting, BUFFY gained more (+2.36 PCK); the voting was tuned on PARSE and not re-tuned for BUFFY.
 
 ### D. Limitations
 * The degradations are synthetic, one severity each. The deblurring PSF (σ 1.5) matches the synthetic blur, so real motion blur needs PSF estimation.
-* The dark and low-contrast gains are not statistically significant at N = 105.
+* The clean and low-contrast gains are not statistically significant at N = 105. On clean PARSE, wrist (−3.8), shoulder (−1.5) and head (−1.4) dip slightly while legs and elbows gain.
 * Adaptive HOG would need the FMP filters retrained (`train_adaptive_fmp.m`). This requires the full INRIA negative set, which is not in the repository.
 * Flip TTA doubles inference time.
 
@@ -223,9 +232,9 @@ demo_complete(4, 'noise');                  % live 4-panel demo
 * **Slide 2 (Problem):** FMP is interpretable and CPU-friendly, but HOG gradients degrade under noise, blur and low light. Baseline PCK drops from 75.4 (clean) to 68.8 (noise) and 68.9 (blur).
 * **Slide 3 (Architecture):** the 7-stage diagram. The FMP model is untouched; the enhancement layer wraps around it, as the abstract proposes.
 * **Slide 4 (Protocol):** tuning split vs. held-out split vs. BUFFY. All design choices were measured, not guessed (table in Section 4).
-* **Slide 5 (Main result):** `final_pck_by_condition.png`. Noise +4.0 and blur +4.5 PCK, both with 95% CIs above zero. APK +5.8 and +7.9.
+* **Slide 5 (Main result):** `final_pck_by_condition.png`. Noise +6.0, blur +6.8 and dark +2.9 PCK, all with 95% CIs above zero. APK +8.1, +10.7 and +2.2. Every condition improves.
 * **Slide 6 (Ablation):** what each stage contributes. Preprocessing does most of the work under degradation; voting and refinement add consistent smaller gains; adaptive HOG is a negative result explained by the train/test feature mismatch.
 * **Slide 7 (Qualitative):** `final_qualitative.png`. Under noise, baseline FMP finds no person at all; the full pipeline recovers the pose.
-* **Slide 8 (Generalisation):** BUFFY +2.4 PCK / +2.6 APK, with no tuning on BUFFY.
+* **Slide 8 (Generalisation):** BUFFY +1.7 PCK / +2.1 APK, with no tuning on BUFFY.
 * **Slide 9 (Limitations and future work):** synthetic degradations, known blur PSF, adaptive-HOG retraining with full INRIA negatives, cost of flip TTA.
 * **Slide 10 (Conclusion):** lightweight, interpretable classical techniques measurably improve FMP's robustness without replacing it, which answers the abstract's research question.

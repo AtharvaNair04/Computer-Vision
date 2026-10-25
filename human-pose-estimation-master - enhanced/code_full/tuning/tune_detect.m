@@ -30,10 +30,12 @@ function tune_detect(variants, conds, idxList)
                 if exist(outFile, 'file'), continue; end
 
                 im = load_test_image(test, n, conds{c});
+                % '@i15' suffix: denser HOG scale pyramid (15 levels per octave)
+                [name, modelV] = parse_variant(variants{v}, model);
                 t = tic;
-                [imT, scale, flipped] = tune_transform(im, variants{v});
+                [imT, scale, flipped] = tune_transform(im, name);
                 tPre = toc(t);
-                boxes = detect_fast(imT, model, model.thresh);
+                boxes = detect_fast(imT, modelV, modelV.thresh);
                 tDet = toc(t) - tPre;
 
                 if ~isempty(boxes)
@@ -46,6 +48,14 @@ function tune_detect(variants, conds, idxList)
             end
             fprintf('[%s] %s %s done (%d images)\n', datestr(now, 'HH:MM:SS'), variants{v}, conds{c}, numel(idxList));
         end
+    end
+end
+
+function [name, model] = parse_variant(name, model)
+    k = strfind(name, '@i');
+    if ~isempty(k)
+        model.interval = str2double(name(k+2:end));
+        name = name(1:k-1);
     end
 end
 

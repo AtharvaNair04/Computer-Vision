@@ -1,10 +1,19 @@
-function results = run_buffy_experiments(numTestImages)
+function results = run_buffy_experiments(numTestImages, shard)
 % RUN_BUFFY_EXPERIMENTS
 % Evaluates Baseline FMP vs. Enhanced Pipeline on BUFFY dataset
 % Protocol: 10 Upper-Body Keypoints (Head, Shoulder, Elbow, Wrist, Hip)
+%
+%   results = run_buffy_experiments()               % all 276 test frames
+%   run_buffy_experiments([], [k n])                % detection only, shard k of n
+%
+% Raw detections are cached per frame in cache/buffy/, so the run is
+% resumable and can be split over several MATLAB processes.
 
     if nargin < 1 || isempty(numTestImages)
         numTestImages = inf;   % all BUFFY test frames
+    end
+    if nargin < 2
+        shard = [];
     end
 
     clc;
@@ -38,13 +47,38 @@ function results = run_buffy_experiments(numTestImages)
     poseBaseRaw = repmat(struct('obj', []), 1, numTest);
     poseEnhRaw  = repmat(struct('obj', []), 1, numTest);
 
+    cacheDir = fullfile('cache', 'buffy');
+    if ~exist(cacheDir, 'dir'), mkdir(cacheDir); end
+    detIdx = 1:numTest;
+    if ~isempty(shard), detIdx = detIdx(shard(1):shard(2):end); end
+
     ticB = tic;
-    for n = 1:numTest
+    for n = detIdx
+        f = fullfile(cacheDir, sprintf('%03d.mat', n));
+        if exist(f, 'file'), continue; end
         im = imread(testSub(n).im);
+        % Baseline FMP, and the enhanced pipeline: adaptive preprocessing +
+        % flip TTA. Thresholds were tuned on PARSE only, so this is a
+        % cross-dataset test.
+        bBase = keep_top(detect_fast(im, model, model.thresh), 2000);
+        bEnh  = enhanced_detect(im, model);
+        save(f, 'bBase', 'bEnh');
+        if mod(n, 25) == 0
+            fprintf('  BUFFY detections: frame %d of %d (elapsed: %.1fs)\n', n, numTest, toc(ticB));
+        end
+    end
+    if ~isempty(shard)
+        results = [];
+        return;
+    end
+
+    for n = 1:numTest
         gtObj = testSub(n).obj;
+        C = load(fullfile(cacheDir, sprintf('%03d.mat', n)));
+        bBase = double(C.bBase);
+        bEnh  = double(C.bEnh);
 
         % 1. Baseline FMP
-        bBase = detect_fast(im, model, model.thresh);
         if ~isempty(bBase)
             bestBox = bestoverlap(bBase, gtObj, 0.2);
             if ~isempty(bestBox), poseBaseRaw(n).obj = box2obj(bestBox); end
@@ -52,11 +86,9 @@ function results = run_buffy_experiments(numTestImages)
             detBaseRaw(n).obj = box2obj(bBase);
         end
 
-        % 2. Enhanced (Adaptive Preprocessing + Flip TTA + Pose Voting).
-        %    Thresholds were tuned on PARSE only, so this is a cross-dataset
-        %    test. Anatomical refinement is PARSE-specific (14 joints) and
-        %    is not applied to the 10 BUFFY upper-body joints.
-        bEnh = enhanced_detect(im, model);
+        % 2. Enhanced: pose voting on the pooled candidates. Anatomical
+        %    refinement is PARSE-specific (14 joints) and is not applied to
+        %    the 10 BUFFY upper-body joints.
         if ~isempty(bEnh)
             bestBoxE = bestoverlap(bEnh, gtObj, 0.2);
             if ~isempty(bestBoxE), poseEnhRaw(n).obj = pose_vote(bestBoxE, bEnh); end
@@ -66,10 +98,6 @@ function results = run_buffy_experiments(numTestImages)
                 objs = [objs, pose_vote(top(t, :), bEnh)]; %#ok<AGROW>
             end
             detEnhRaw(n).obj = objs;
-        end
-
-        if mod(n, 5) == 0 || n == numTest
-            fprintf('  BUFFY Processed %d/%d images (elapsed: %.1fs)\n', n, numTest, toc(ticB));
         end
     end
 
@@ -130,4 +158,12 @@ function results = run_buffy_experiments(numTestImages)
     results.meanAPK_enh  = mean(apkEnh5);
 
     save(fullfile('cache', sprintf('BUFFY_eval_N%d.mat', numTest)), 'results');
+end
+
+function b = keep_top(b, K)
+    if size(b, 1) > K
+        [~, I] = sort(b(:, end), 'descend');
+        b = b(I(1:K), :);
+    end
+    b = single(b);
 end

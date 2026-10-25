@@ -4,10 +4,10 @@
 addpath(fullfile(pwd,'tuning')); addpath(pwd);
 conds = {'clean','dark','lowcontrast','noise','blur'};
 tags  = {'base','nlm','gamma067','deconv15'};
-vote  = struct('iou',0.7,'delta',0.25,'T',0.1);
+vote  = struct('iou',0.5,'delta',1.0,'T',0.5,'r',0.25);
 S = load(fullfile('cache','tuning','quality.mat')); Q = S.Q;
 
-tblFile = fullfile('cache','tuning','gate_tables.mat');
+tblFile = fullfile('cache','tuning','gate_tables_v2.mat');
 if exist(tblFile, 'file')
     load(tblFile, 'PI');
 else

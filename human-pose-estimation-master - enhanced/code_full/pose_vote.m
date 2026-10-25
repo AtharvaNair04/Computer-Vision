@@ -1,23 +1,29 @@
 function obj = pose_vote(box, boxes, params)
 % POSE_VOTE
-% Stage 4b: score-weighted pose voting. Instead of trusting the single
-% arg-max FMP configuration, every part location is replaced by the
-% weighted mean over near-duplicate candidates of the same person:
+% Stage 4b: part-consistent, score-weighted pose voting. Instead of
+% trusting the single arg-max FMP configuration, each part location is
+% replaced by the weighted mean over near-duplicate candidates of the same
+% person that AGREE on that part:
 %
 %   candidates : person-box IoU with the selected detection > params.iou
 %                and score >= s* - params.delta
+%   per part j : a candidate votes only if its part j lies within
+%                params.r x (selected person size) of the selected part j,
+%                so different limb hypotheses are never averaged together
 %   weights    : w_i = exp((s_i - s*) / params.T)
 %
 % This averages out the quantisation and mixture-switching jitter of the
 % HOG grid (and, with flip TTA, of the two mirrored passes).
-% Defaults (iou 0.7, delta 0.25, T 0.1) were chosen on PARSE test 1-100.
+% Defaults (iou 0.5, delta 1.0, T 0.5, r 0.25) were chosen on PARSE test
+% images 1-100 (tuning/tune_vote2.m).
 %
 % Returns a box2obj-style struct for the selected detection.
 
     if nargin < 3, params = struct(); end
-    if ~isfield(params, 'iou'),   params.iou = 0.7;    end
-    if ~isfield(params, 'delta'), params.delta = 0.25; end
-    if ~isfield(params, 'T'),     params.T = 0.1;      end
+    if ~isfield(params, 'iou'),   params.iou = 0.5;   end
+    if ~isfield(params, 'delta'), params.delta = 1.0; end
+    if ~isfield(params, 'T'),     params.T = 0.5;     end
+    if ~isfield(params, 'r'),     params.r = 0.25;    end
 
     obj = box2obj(box);
     s = boxes(:, end);
@@ -25,13 +31,15 @@ function obj = pose_vote(box, boxes, params)
     if nnz(keep) < 2, return; end
 
     w = exp((s(keep) - box(end)) / params.T);
-    w = w / sum(w);
     cand = box2obj(boxes(keep, :));
-    pts = zeros(size(obj.point));
-    for i = 1:numel(cand)
-        pts = pts + w(i) * cand(i).point;
+    P = cat(3, cand.point);                                   % parts x 2 x K
+    W = repmat(reshape(w, 1, 1, []), size(P, 1), 1, 1);       % parts x 1 x K
+    if isfinite(params.r)
+        sz = max(max(obj.point) - min(obj.point));
+        d = sqrt(sum((P - obj.point) .^ 2, 2));
+        W = W .* (d <= params.r * sz);                         % the selected box always votes
     end
-    obj.point = pts;
+    obj.point = sum(P .* W, 3) ./ sum(W, 3);
 end
 
 function o = person_iou(box, boxes)

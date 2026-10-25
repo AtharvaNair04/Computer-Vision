@@ -78,13 +78,17 @@ function obj = vote_obj(box, boxes, vote)
     keep = iou > vote.iou & s >= box(end) - vote.delta;
     if nnz(keep) < 2, return; end
     w = exp((s(keep) - box(end)) / vote.T);
-    w = w / sum(w);
     cand = box2obj(boxes(keep, :));
-    pts = zeros(size(obj.point));
-    for i = 1:numel(cand)
-        pts = pts + w(i) * cand(i).point;
+    P = cat(3, cand.point);                                  % parts x 2 x K
+    W = repmat(reshape(w, 1, 1, []), size(P, 1), 1, 1);       % parts x 1 x K
+    if isfield(vote, 'r') && isfinite(vote.r)
+        % Part-consistent voting: a candidate votes for a part only if it
+        % agrees with the selected detection on that part's location.
+        sz = max(max(obj.point) - min(obj.point));
+        d = sqrt(sum((P - obj.point) .^ 2, 2));
+        W = W .* (d <= vote.r * sz);
     end
-    obj.point = pts;
+    obj.point = sum(P .* W, 3) ./ sum(W, 3);
 end
 
 function o = person_iou(box, boxes)
